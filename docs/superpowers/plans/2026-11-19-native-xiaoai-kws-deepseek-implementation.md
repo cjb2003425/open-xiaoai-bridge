@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Use the L06A native `小爱同学` detector as a wake-only signal, suppress Xiaomi locally, acknowledge with `我在`, and route the next locally transcribed utterance directly to DeepSeek.
+**Goal:** Use the L06A native `小爱同学` detector and its native `我在` as the wake-only interaction, suppress the remaining Xiaomi conversation locally, and route the next Bridge-transcribed utterance directly to DeepSeek without adding another acknowledgement.
 
-**Architecture:** A persistent Rust Client guard parses the first empty native `SpeechRecognizer.RecognizeResult`, suppresses Xiaomi, plays the local acknowledgement, and emits a deduplicated `native_kws` event.  The Bridge disables only its server-side KWS, keeps PCM/VAD/local ASR, accepts that event, and starts an OpenAI-compatible conversation without a duplicate ready sound.
+**Architecture:** The speaker firmware says `我在` before a persistent Rust Client guard sees the first empty native `SpeechRecognizer.RecognizeResult`.  The guard suppresses the remaining Xiaomi conversation and emits a deduplicated `native_kws` event without playing audio.  The Bridge disables only its server-side KWS, keeps PCM/VAD/local ASR, accepts that event, and starts an OpenAI-compatible conversation without a duplicate acknowledgement or ready sound.
 
 **Tech Stack:** Rust 2021/Tokio/Serde, Python 3.12/asyncio/unittest, systemd user service, OpenWrt procd shell scripts, Linaro ARMv7 toolchain, DeepSeek OpenAI-compatible API.
 
@@ -23,9 +23,9 @@
 
 ## Review Focus
 
-- A malformed or partial instruction-log line must not trigger suppression, acknowledgement, or a Bridge event (Task 1 tests).
+- A malformed or partial instruction-log line must not trigger suppression or a Bridge event (Task 1 tests).
 - Repeated markers for one `dialog_id`, including after log rotation, must yield one takeover only (Tasks 1 and 2 tests).
-- A disconnected Bridge must still suppress Xiaomi but must not play `我在` or queue a stale event for reconnection (Task 2 tests).
+- A disconnected Bridge must still suppress Xiaomi and must not add audio or queue a stale event for reconnection.  The firmware's native `我在` may already have played before the marker (Task 2 tests).
 - A false/invalid `native_kws` payload must not start DeepSeek, and bounded deduplication must not grow forever (Task 5 tests).
 - A Client or Bridge failure during the controlled mode switch must restore native-wake blocking and leave the PCM tap healthy (Tasks 3 and 7 checks).
 
@@ -43,7 +43,7 @@
 
 - [ ] **Step 1: Write failing Rust unit tests in `native_wake.rs`**
 
-Test exact acceptance of an empty, non-final, `is_vad_begin=false` `SpeechRecognizer.RecognizeResult` with a non-empty `dialog_id`.  Test rejection of malformed JSON, empty IDs, non-empty text, final results, `is_vad_begin=true`, and other namespaces/names.  Test bounded deduplication and assert that the executor invokes suppression before `tts_play.sh '我在'`, records each result, and omits acknowledgement when `connected=false`.
+Test exact acceptance of an empty, non-final, `is_vad_begin=false` `SpeechRecognizer.RecognizeResult` with a non-empty `dialog_id`.  Test rejection of malformed JSON, empty IDs, non-empty text, final results, `is_vad_begin=true`, and other namespaces/names.  Test bounded deduplication and assert that the executor invokes suppression only, never invokes `tts_play.sh '我在'`, and always reports `ack_played=false` because the acknowledgement is firmware-owned.
 
 - [ ] **Step 2: Run the focused tests and verify failure**
 
@@ -53,7 +53,7 @@ Expected: FAIL because `native_wake` and its interfaces do not exist.
 
 - [ ] **Step 3: Implement the parser, deduper, plan, and executor**
 
-Use a maximum of 64 remembered `dialog_id` values.  The local suppression command must stop `tts_play.sh`/`miplayer`, pause `mphelper`, and toggle the existing pnshelper awake-off sequence before acknowledgement.  Do not interpolate instruction-log content into shell commands.
+Use a maximum of 64 remembered `dialog_id` values.  The local suppression command must stop `tts_play.sh`/`miplayer`, pause `mphelper`, and toggle the existing pnshelper awake-off sequence before event emission.  Do not play or synthesize another acknowledgement, and do not interpolate instruction-log content into shell commands.
 
 - [ ] **Step 4: Run Rust tests**
 
@@ -81,7 +81,7 @@ git -C /home/torrey/workspace/open-xiaoai commit -m "feat: parse native XiaoAI w
 
 - [ ] **Step 1: Write failing lifecycle tests**
 
-Test connected and disconnected plans, event emission only after suppression and acknowledgement finish, no stale emission after reconnect, raw instruction forwarding for non-wake lines, and one event for duplicate markers.
+Test connected and disconnected plans, event emission only after suppression finishes, no Client-added acknowledgement, no stale emission after reconnect, raw instruction forwarding for non-wake lines, and one event for duplicate markers.
 
 - [ ] **Step 2: Run focused Rust tests and verify failure**
 
@@ -91,7 +91,7 @@ Expected: FAIL because the persistent guard and `is_connected` are absent.
 
 - [ ] **Step 3: Start the instruction monitor once for the Client process**
 
-Move instruction monitoring out of the per-WebSocket `init`/`dispose` lifecycle.  Its callback always executes local suppression for admitted markers; it plays `我在` and emits `native_kws` only while `MessageManager::is_connected()` is true.  Keep playing/KWS monitors scoped to each WebSocket connection.
+Move instruction monitoring out of the per-WebSocket `init`/`dispose` lifecycle.  Its callback always executes local suppression for admitted markers and never plays an acknowledgement; it emits `native_kws` only while `MessageManager::is_connected()` is true.  Keep playing/KWS monitors scoped to each WebSocket connection.
 
 - [ ] **Step 4: Run all Client Rust tests and formatter**
 
@@ -322,7 +322,7 @@ Run the manager's `allow-native-wake`, then verify exactly one hooked `mipns-xia
 
 - [ ] **Step 2: Run five wake-only trials**
 
-For each `小爱同学`, verify exactly one local `我在`, one `native_kws` event, one Bridge route, and no Xiaomi TTS/NLP response.  Check unique `dialog_id` values and no duplicate routing.
+For each `小爱同学`, verify exactly one firmware-native `我在`, no Client/Bridge acknowledgement, one `native_kws` event, one Bridge route, and no subsequent Xiaomi TTS/NLP response.  Check unique `dialog_id` values and no duplicate routing.
 
 - [ ] **Step 3: Run end-to-end DeepSeek trials**
 
@@ -330,7 +330,7 @@ After `我在`, ask at least two questions.  Verify local ASR text, a direct Dee
 
 - [ ] **Step 4: Test disconnected-Bridge behavior**
 
-Stop the Bridge, say `小爱同学`, and verify Xiaomi is suppressed with no `我在` and no stale event after reconnection.  Restart Bridge and verify the next fresh wake succeeds.
+Stop the Bridge, say `小爱同学`, and verify the firmware may still say its native `我在`, the remaining Xiaomi conversation is suppressed, and no stale event appears after reconnection.  Restart Bridge and verify the next fresh wake succeeds.
 
 - [ ] **Step 5: Persist and reboot only after user acceptance**
 
@@ -339,4 +339,3 @@ Install the validated bundle under `/data`, write mode `takeover`, sync, and reb
 - [ ] **Step 6: Final rollback proof and handoff**
 
 Run `block-native-wake`, verify `小爱同学` is silent and PCM remains healthy, then return to `takeover` only if the user confirms the final desired state.  Report exact services, mode file, rollback command, test results, and note that the API key remains only in the protected environment.
-
