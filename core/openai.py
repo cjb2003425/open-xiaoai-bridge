@@ -78,7 +78,7 @@ class OpenAIManager:
             )
 
         cls._base_url = str(config.get("base_url", "http://127.0.0.1:8000/v1")).rstrip("/")
-        cls._api_key = str(config.get("api_key", "") or "")
+        cls._api_key = cls._configured_api_key(config)
         cls._model = str(config.get("model", "gpt-4o-mini"))
         cls._session_key = str(config.get("session_key", "agent:default:open-xiaoai-bridge"))
         cls._session_header = str(config.get("session_header", "X-Hermes-Session-Key") or "").strip()
@@ -120,6 +120,14 @@ class OpenAIManager:
         if value is None or value == "":
             return None
         return float(value)
+
+    @staticmethod
+    def _configured_api_key(config: dict[str, Any]) -> str:
+        """Prefer the runtime secret so API keys do not need to live in config.py."""
+        runtime_key = get_env("OPENAI_API_KEY")
+        if runtime_key is not None:
+            return str(runtime_key)
+        return str(config.get("api_key", "") or "")
 
     @classmethod
     def _optional_int(cls, value) -> int | None:

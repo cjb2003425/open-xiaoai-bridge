@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 import threading
 import time
 
@@ -36,6 +37,20 @@ class XiaoAI:
     _suppressed_dialog_last_attempt: dict[str, float] = {}
     _MAX_SUPPRESSED_DIALOGS = 100
     _SUPPRESS_RETRY_INTERVAL = 0.35
+    _native_wake_dialog_ids: deque[str] = deque()
+    _native_wake_dialog_set: set[str] = set()
+    _MAX_NATIVE_WAKE_DIALOGS = 64
+
+    @classmethod
+    def _admit_native_wake_dialog(cls, dialog_id: str) -> bool:
+        if dialog_id in cls._native_wake_dialog_set:
+            return False
+        if len(cls._native_wake_dialog_ids) == cls._MAX_NATIVE_WAKE_DIALOGS:
+            expired = cls._native_wake_dialog_ids.popleft()
+            cls._native_wake_dialog_set.discard(expired)
+        cls._native_wake_dialog_ids.append(dialog_id)
+        cls._native_wake_dialog_set.add(dialog_id)
+        return True
 
     @classmethod
     def refresh_runtime_config(cls, *_args):
@@ -145,6 +160,33 @@ class XiaoAI:
         # 记录所有事件用于调试监听退出
         logger.debug(f"[XiaoAI] 📡 收到事件: {event_type} | 数据: {event_data}")
 
+        if event_type == "native_kws":
+            if not isinstance(event_data, dict):
+                logger.debug("[XiaoAI] 忽略非字典 native_kws 数据")
+                return
+            dialog_id = event_data.get("dialog_id")
+            local_suppressed = event_data.get("local_suppressed")
+            ack_played = event_data.get("ack_played")
+            if (
+                not isinstance(dialog_id, str)
+                or not dialog_id
+                or not isinstance(local_suppressed, bool)
+                or not isinstance(ack_played, bool)
+            ):
+                logger.debug("[XiaoAI] 忽略无效 native_kws 数据")
+                return
+            if not cls._admit_native_wake_dialog(dialog_id):
+                logger.debug(f"[XiaoAI] 忽略重复 native_kws: {dialog_id}")
+                return
+
+            if local_suppressed:
+                cls._suppressed_dialog_ids.add(dialog_id)
+            else:
+                await cls._suppress_dialog(dialog_id, "音箱端原生唤醒压制失败")
+            logger.wakeup("小爱同学", module="XiaoAI")
+            await EventManager.wakeup("小爱同学", "native_kws")
+            return
+
         if event_type == "instruction":
             if not isinstance(event_data, dict):
                 logger.debug(
@@ -218,12 +260,13 @@ class XiaoAI:
                             )
                         return
                     
-                    # 只有明确的 is_vad_begin=False 且没有文本时才触发唤醒
-                    # 避免重复触发
+                    # Structured native_kws events own the native wake flow.
+                    # The same empty marker is still forwarded as an instruction,
+                    # but must not interrupt the conversation a second time.
                     if not text and is_vad_begin is False:
-                        logger.wakeup("小爱同学", module="XiaoAI")
-                        cls.conversation.reset_retries()
-                        EventManager.on_interrupt()
+                        logger.debug(
+                            "[XiaoAI] 原生唤醒空标记已由 native_kws 处理"
+                        )
                     elif text and is_final and cls._is_external_wakeup_text(text):
                         await cls._suppress_dialog(
                             dialog_id,

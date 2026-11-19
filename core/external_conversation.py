@@ -72,12 +72,13 @@ class ExternalConversationController:
     WAKEUP_SOURCE = "openclaw"
     MANAGER = None
 
-    def __init__(self):
+    def __init__(self, initial_notify: bool = True):
         self.config = ConfigManager.instance()
         if self.MANAGER is None:
             raise RuntimeError("MANAGER must be set by subclass")
         self.backend = self.MANAGER
         self.active = False
+        self.initial_notify = initial_notify
 
         # Per-session asyncio.Future used to receive VAD events
         self._vad_future: asyncio.Future | None = None
@@ -181,7 +182,8 @@ class ExternalConversationController:
         # so speech detection starts clean when listening begins.
         await self._stop_recording()
         logger.debug("Recording stopped", module=self.LOG_MODULE)
-        await self._play_notify()
+        if self.initial_notify:
+            await self._play_notify()
         await self._start_recording()
         logger.debug("Ready to listen", module=self.LOG_MODULE)
 

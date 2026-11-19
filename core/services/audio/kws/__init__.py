@@ -103,56 +103,42 @@ class _KWS:
             # 先进行 VAD 检测
             speech_prob = Silero.vad(frames, self.sample_rate) or 0
             is_speech = speech_prob >= self.vad_threshold
-            
+
             if is_speech:
-                # 检测到语音，立即激活
                 if not self.vad_active:
                     self.vad_active = True
                     self.vad_start_time = time.time()
                     logger.debug("检测到语音，开始 KWS 检测", module="KWS")
-                
+
                 self.vad_silence_frames = 0
-                
-                # 只在有语音时才进行 KWS 检测
                 result = SherpaOnnx.kws(frames)
                 if result:
                     logger.wakeup(result, module="KWS")
                     self.on_message(result)
-                    # 唤醒后重置状态
                     self.vad_active = False
                     self.vad_silence_frames = 0
-                    
-            else:
-                # 静音处理
-                if self.vad_active:
-                    self.vad_silence_frames += 1
-                    
-                    # 在激活状态下，允许一定的静音间隙
-                    if self.vad_silence_frames <= self.vad_min_silence_frames:
-                        # 继续将音频送入 KWS，允许短暂的静音
-                        result = SherpaOnnx.kws(frames)
-                        if result:
-                            logger.wakeup(result, module="KWS")
-                            self.on_message(result)
-                            self.vad_active = False
-                            self.vad_silence_frames = 0
-                    else:
-                        # 静音超过阈值，停止处理
-                        duration_ms = self.vad_silence_frames * self.frame_duration_ms
-                        active_duration_ms = (time.time() - self.vad_start_time) * 1000 if hasattr(self, 'vad_start_time') else -1
-                        logger.debug(
-                            (
-                                f"检测到持续静音（{duration_ms:.0f}ms），暂停 KWS，"
-                                f"本次 KWS 监听时长 {active_duration_ms:.0f}ms"
-                            ),
-                            module="KWS",
-                        )
+            elif self.vad_active:
+                self.vad_silence_frames += 1
+                if self.vad_silence_frames <= self.vad_min_silence_frames:
+                    result = SherpaOnnx.kws(frames)
+                    if result:
+                        logger.wakeup(result, module="KWS")
+                        self.on_message(result)
                         self.vad_active = False
                         self.vad_silence_frames = 0
-                        # Reset Sherpa stream to discard partial recognition state,
-                        # preventing leftover audio from the previous utterance
-                        # from combining with the next one.
-                        SherpaOnnx.reset()
+                else:
+                    duration_ms = self.vad_silence_frames * self.frame_duration_ms
+                    active_duration_ms = (time.time() - self.vad_start_time) * 1000
+                    logger.debug(
+                        (
+                            f"检测到持续静音（{duration_ms:.0f}ms），暂停 KWS，"
+                            f"本次 KWS 监听时长 {active_duration_ms:.0f}ms"
+                        ),
+                        module="KWS",
+                    )
+                    self.vad_active = False
+                    self.vad_silence_frames = 0
+                    SherpaOnnx.reset()
 
     def on_message(self, text: str):
         loop = get_app().loop if get_app() else get_xiaoai().async_loop

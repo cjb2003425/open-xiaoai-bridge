@@ -3,6 +3,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -56,6 +57,27 @@ class OpenAIHeadersTest(unittest.TestCase):
             "agent:default:open-xiaoai-bridge",
             headers["X-Hermes-Session-Key"],
         )
+
+    def test_runtime_api_key_overrides_config_secret(self):
+        with patch("core.openai.get_env", return_value="runtime-secret"):
+            self.assertEqual(
+                "runtime-secret",
+                self.manager._configured_api_key({"api_key": "config-secret"}),
+            )
+
+    def test_config_api_key_remains_fallback(self):
+        with patch("core.openai.get_env", return_value=None):
+            self.assertEqual(
+                "config-secret",
+                self.manager._configured_api_key({"api_key": "config-secret"}),
+            )
+
+    def test_explicit_empty_runtime_api_key_disables_config_secret(self):
+        with patch("core.openai.get_env", return_value=""):
+            self.assertEqual(
+                "",
+                self.manager._configured_api_key({"api_key": "config-secret"}),
+            )
 
 
 if __name__ == "__main__":

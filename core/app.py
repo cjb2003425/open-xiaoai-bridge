@@ -27,6 +27,7 @@ from core.openclaw import OpenClawManager
 from core.openai import OpenAIManager
 from core.qwenpaw import QwenPawManager
 from core.services.api_server import APIServer
+from core.utils.env import audio_service_flags
 
 
 class MainApp:
@@ -132,9 +133,7 @@ class MainApp:
         self._enable_api_server = enable_api_server
 
         # Check audio input status
-        audio_input_enabled = os.environ.get(
-            "AUDIO_INPUT_ENABLE", "true"
-        ).strip().lower() in ("true", "1", "yes", "on")
+        audio_input_enabled, _ = audio_service_flags()
         
         if not audio_input_enabled and self._enable_xiaozhi:
             raise RuntimeError(
@@ -222,15 +221,16 @@ class MainApp:
         ):
             # Check audio input via env var (same as Rust), default True
             # Supports: "true"/"false", "1"/"0", "yes"/"no", "on"/"off"
-            audio_input_enabled = os.environ.get(
-                "AUDIO_INPUT_ENABLE", "true"
-            ).strip().lower() in ("true", "1", "yes", "on")
+            audio_input_enabled, kws_enabled = audio_service_flags()
             if audio_input_enabled:
                 from core.services.audio.vad import VAD
-                from core.services.audio.kws import KWS
                 VAD.start()
-                KWS.start()
-                logger.info("[MainApp] Audio input enabled (VAD/KWS started)")
+                if kws_enabled:
+                    from core.services.audio.kws import KWS
+                    KWS.start()
+                    logger.info("[MainApp] Audio input enabled (VAD/KWS started)")
+                else:
+                    logger.info("[MainApp] Audio input enabled (VAD started, KWS disabled)")
             else:
                 logger.info("[MainApp] Audio input disabled (VAD/KWS not started)")
 

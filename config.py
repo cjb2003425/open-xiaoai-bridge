@@ -42,6 +42,9 @@ async def before_wakeup(speaker, text, source, app):
             app.set_openclaw_session_key("agent:main:xxx")
         不调用则自动使用 openclaw.session_key 的默认值，无需手动重置。
     """
+    if source == "native_kws":
+        return "openai"
+
     if source == "kws":
         # --- 示例一：按唤醒词路由到不同 Agent ---
         # AGENT_SESSIONS = {
@@ -66,22 +69,9 @@ async def before_wakeup(speaker, text, source, app):
         #     await speaker.play(server_file="/path/to/openclaw_intro.wav")
         #     return "openclaw"
 
-        # Route to OpenClaw Agent by wake word
-        if "龙虾" in text:
-            await speaker.play(text="龙虾来了")
-            return "openclaw"
-
-        if "小黑" in text:
-            await speaker.play(text="小黑来了")
-            return "openai"
-
-        if "小爪" in text:
-            await speaker.play(text="小爪来了")
-            return "qwenpaw"
-
         if "小智" in text:
-            await speaker.play(text="小智来了")
-            return "xiaozhi"
+            await speaker.play(text="我在")
+            return "openai"
 
         return None
 
@@ -160,7 +150,7 @@ async def after_wakeup(speaker, source=None, session_key=None):
         #     await speaker.play(text="再见")
         await speaker.play(text="龙虾，再见")
     if source == "openai":
-        await speaker.play(text="小黑，再见")
+        await speaker.play(text="小智，再见")
     if source == "qwenpaw":
         await speaker.play(text="小爪，再见")
     if source == "xiaozhi":
@@ -169,17 +159,7 @@ async def after_wakeup(speaker, source=None, session_key=None):
 APP_CONFIG = {
     "wakeup": {
         # 自定义唤醒词列表（英文字母要全小写）
-        "keywords": [
-            "你好小智",
-            "小智小智",
-            "hi open claw",
-            "你好龙虾",
-            "龙虾你好",
-            "你好小黑",
-            "小黑你好",
-            "你好小爪",
-            "小爪你好",
-        ],
+        "keywords": [],
         # 静音多久后自动退出唤醒（秒）
         "timeout": 20,
         # 语音识别结果回调
@@ -238,7 +218,7 @@ APP_CONFIG = {
         "OTA_URL": "http://127.0.0.1:8003/xiaozhi/ota/",
         "WEBSOCKET_URL": "ws://127.0.0.1:8000/xiaozhi/v1/",
         "WEBSOCKET_ACCESS_TOKEN": "", #（可选）一般用不到这个值
-        "DEVICE_ID": "", #（可选）默认自动生成
+        "DEVICE_ID": "00:e0:4c:92:db:48", #（可选）默认自动生成
         "VERIFICATION_CODE": "", # 首次登陆时，验证码会在这里更新
     },
     "xiaoai": {
@@ -301,7 +281,7 @@ APP_CONFIG = {
     # OpenAI-compatible Service Configuration
     # 可接入 Hermes Agent API Server、OpenAI、Ollama、LM Studio 等兼容 /v1/chat/completions 的服务
     "openai": {
-        "base_url": "http://127.0.0.1:8000/v1",
+        "base_url": "http://127.0.0.1:8642/v1",
         "api_key": "",
         "model": "gpt-4o-mini",
         # 输入模式：

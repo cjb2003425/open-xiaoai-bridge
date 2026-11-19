@@ -112,6 +112,7 @@ OPEN_XIAOAI_TOKEN=your-secret-token API_SERVER_ENABLE=1 ./scripts/start.sh
 | `QWENPAW_ENABLE` | 启用 QwenPaw | 禁用        |
 | `API_SERVER_ENABLE`  | 启用 HTTP API | 禁用            |
 | `AUDIO_INPUT_ENABLE` | 启用音频输入（关闭后小智/KWS/local\_asr不可用） | 启用            |
+| `KWS_ENABLE`         | 启用 Bridge 端关键词检测；关闭后仍保留 VAD/local\_asr | 启用       |
 | `API_SERVER_HOST`    | API 监听地址    | `127.0.0.1`   |
 | `API_SERVER_PORT`    | API 监听端口    | `9092`        |
 | `OPEN_XIAOAI_TOKEN`  | Client 鉴权 token，设置后仅持有相同 token 的 Client 才能连接 | 不鉴权 |

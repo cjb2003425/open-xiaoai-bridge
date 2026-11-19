@@ -168,7 +168,9 @@ class WakeupSessionManager:
         if should_wakeup == "openclaw":
             await self._start_openclaw_conversation()
         elif should_wakeup == "openai":
-            await self._start_openai_conversation()
+            await self._start_openai_conversation(
+                initial_notify=source != "native_kws"
+            )
         elif should_wakeup == "qwenpaw":
             await self._start_qwenpaw_conversation()
         elif should_wakeup == "xiaozhi":
@@ -202,7 +204,7 @@ class WakeupSessionManager:
             if kws:
                 kws.resume()
 
-    async def _start_openai_conversation(self):
+    async def _start_openai_conversation(self, initial_notify: bool = True):
         """Start an OpenAI-compatible continuous conversation session."""
         from core.openai_conversation import OpenAIConversationController
 
@@ -210,7 +212,9 @@ class WakeupSessionManager:
         if kws:
             kws.pause()
         try:
-            self._openai_controller = OpenAIConversationController()
+            self._openai_controller = OpenAIConversationController(
+                initial_notify=initial_notify
+            )
             self._openai_task = asyncio.create_task(self._openai_controller.start())
             await self._openai_task
         except asyncio.CancelledError:
