@@ -175,16 +175,14 @@ class ExternalConversationController:
     async def _conversation_loop(self):
         """Run VAD -> ASR -> backend -> TTS turns until exit."""
 
-        # Mute mic → play notify → unmute.
-        # _play_notify() blocks for ~740ms (the beep duration), during which
-        # the mic is off and before_wakeup TTS echo naturally fades.
-        # VAD.resume() resets all state (speech_frames, input_bytes),
-        # so speech detection starts clean when listening begins.
-        await self._stop_recording()
-        logger.debug("Recording stopped", module=self.LOG_MODULE)
+        # Only notification-based wakeups need to mute the mic around the
+        # beep. Native KWS has already acknowledged the wakeup and keeps the
+        # PCM stream running, so restarting it here would clip early speech.
         if self.initial_notify:
+            await self._stop_recording()
+            logger.debug("Recording stopped", module=self.LOG_MODULE)
             await self._play_notify()
-        await self._start_recording()
+            await self._start_recording()
         logger.debug("Ready to listen", module=self.LOG_MODULE)
 
         while self.active:

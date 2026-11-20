@@ -171,9 +171,32 @@ class NativeKwsConversationTest(unittest.TestCase):
 
         asyncio.run(controller._conversation_loop())
 
-        controller._stop_recording.assert_awaited_once()
+        controller._stop_recording.assert_not_awaited()
         controller._play_notify.assert_not_awaited()
-        controller._start_recording.assert_awaited_once()
+        controller._start_recording.assert_not_awaited()
+
+    def test_initial_notify_preserves_recording_handoff_order(self):
+        from core.external_conversation import ExternalConversationController
+
+        class Controller(ExternalConversationController):
+            MANAGER = object()
+
+        calls = []
+        controller = Controller(initial_notify=True)
+        controller.active = False
+        controller._stop_recording = mock.AsyncMock(
+            side_effect=lambda: calls.append("stop")
+        )
+        controller._play_notify = mock.AsyncMock(
+            side_effect=lambda: calls.append("notify")
+        )
+        controller._start_recording = mock.AsyncMock(
+            side_effect=lambda: calls.append("start")
+        )
+
+        asyncio.run(controller._conversation_loop())
+
+        self.assertEqual(["stop", "notify", "start"], calls)
 
 
 if __name__ == "__main__":
