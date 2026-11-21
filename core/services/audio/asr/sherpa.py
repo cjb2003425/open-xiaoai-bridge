@@ -7,6 +7,7 @@ Supported backends (set via APP_CONFIG["asr"]["model"]):
   - "sense_voice" (default): SenseVoice multilingual model
   - "paraformer": Paraformer Chinese model
   - "fire_red_asr": FireRedASR AED model
+  - "qwen3_asr": Qwen3-ASR multilingual model
 """
 
 import os
@@ -40,6 +41,32 @@ _BACKENDS = {
             "decoder": {True: "decoder.int8.onnx", False: "decoder.onnx"},
         },
     },
+    "qwen3_asr": {
+        "dir_keyword": "qwen3-asr",
+        "factory": "from_qwen3_asr",
+        "extra_kwargs": {
+            "max_total_len": 512,
+            "max_new_tokens": 128,
+            "temperature": 1e-6,
+            "top_p": 0.8,
+            "seed": 42,
+            "hotwords": "",
+        },
+        "model_files": {
+            "conv_frontend": {
+                True: "conv_frontend.onnx",
+                False: "conv_frontend.onnx",
+            },
+            "encoder": {True: "encoder.int8.onnx", False: "encoder.onnx"},
+            "decoder": {True: "decoder.int8.onnx", False: "decoder.onnx"},
+        },
+        "model_dirs": {"tokenizer": "tokenizer"},
+        "uses_tokens": False,
+    },
+}
+
+_REQUIRED_DIRECTORY_FILES = {
+    "tokenizer": ("vocab.json", "merges.txt", "tokenizer_config.json"),
 }
 
 
@@ -71,14 +98,52 @@ class _SherpaASR:
             for arg_name, filenames in spec["model_files"].items()
         }
 
-    def _dir_has_required_files(self, path: str, required_files: dict[str, str]) -> bool:
-        return all(
-            os.path.isfile(os.path.join(path, filename))
+    def _get_required_model_dirs(self, backend: str) -> dict[str, str]:
+        return dict(_BACKENDS[backend].get("model_dirs", {}))
+
+    def _get_missing_model_paths(
+        self,
+        path: str,
+        required_files: dict[str, str],
+        required_dirs: dict[str, str],
+    ) -> list[str]:
+        missing = [
+            filename
             for filename in required_files.values()
+            if not os.path.isfile(os.path.join(path, filename))
+        ]
+        for arg_name, dirname in required_dirs.items():
+            directory = os.path.join(path, dirname)
+            if not os.path.isdir(directory):
+                missing.append(dirname)
+                continue
+            missing.extend(
+                os.path.join(dirname, filename)
+                for filename in _REQUIRED_DIRECTORY_FILES.get(arg_name, ())
+                if not os.path.isfile(os.path.join(directory, filename))
+            )
+        return missing
+
+    def _dir_has_required_files(
+        self,
+        path: str,
+        required_files: dict[str, str],
+        required_dirs: dict[str, str] | None = None,
+    ) -> bool:
+        return not self._get_missing_model_paths(
+            path,
+            required_files,
+            required_dirs or {},
         )
 
-    def _find_model_dir(self, keyword: str, required_files: dict[str, str]) -> str:
+    def _find_model_dir(
+        self,
+        keyword: str,
+        required_files: dict[str, str],
+        required_dirs: dict[str, str] | None = None,
+    ) -> str:
         """Scan core/models/ for a directory matching the backend keyword."""
+        required_dirs = required_dirs or {}
         models_root = get_model_file_path("")
         cfg = ConfigManager.instance()
         model_dir_name = cfg.get_app_config("asr.model_dir")
@@ -86,13 +151,17 @@ class _SherpaASR:
         # If model_dir is explicitly configured, use it directly
         if model_dir_name:
             explicit_path = os.path.join(models_root, model_dir_name)
-            if self._dir_has_required_files(explicit_path, required_files):
+            if self._dir_has_required_files(
+                explicit_path,
+                required_files,
+                required_dirs,
+            ):
                 return explicit_path
-            missing = [
-                filename
-                for filename in required_files.values()
-                if not os.path.isfile(os.path.join(explicit_path, filename))
-            ]
+            missing = self._get_missing_model_paths(
+                explicit_path,
+                required_files,
+                required_dirs,
+            )
             raise FileNotFoundError(
                 f"Configured model_dir '{model_dir_name}' not found or missing "
                 f"required files {missing} in {models_root}."
@@ -101,13 +170,17 @@ class _SherpaASR:
         # Otherwise, scan for first matching directory
         for entry in os.scandir(models_root):
             if entry.is_dir() and keyword in entry.name:
-                if self._dir_has_required_files(entry.path, required_files):
+                if self._dir_has_required_files(
+                    entry.path,
+                    required_files,
+                    required_dirs,
+                ):
                     return entry.path
 
         raise FileNotFoundError(
             f"No '{keyword}' model found in {models_root}. "
-            f"Please place the matching model directory under core/models/ with files: "
-            f"{', '.join(required_files.values())}."
+            f"Please place the matching model directory under core/models/ with paths: "
+            f"{', '.join((*required_files.values(), *required_dirs.values()))}."
         )
 
     def _ensure_loaded(self):
@@ -118,40 +191,51 @@ class _SherpaASR:
         backend = self._get_backend()
         spec = _BACKENDS[backend]
         required_files = self._get_required_model_files(backend)
+        required_dirs = self._get_required_model_dirs(backend)
 
-        model_dir = self._find_model_dir(spec["dir_keyword"], required_files)
+        model_dir = self._find_model_dir(
+            spec["dir_keyword"],
+            required_files,
+            required_dirs,
+        )
         model_kwargs = {
             arg_name: os.path.join(model_dir, filename)
             for arg_name, filename in required_files.items()
         }
-        tokens_path = os.path.join(model_dir, "tokens.txt")
+        model_kwargs.update(
+            {
+                arg_name: os.path.join(model_dir, dirname)
+                for arg_name, dirname in required_dirs.items()
+            }
+        )
 
-        if not os.path.isfile(tokens_path):
-            raise FileNotFoundError(
-                f"Missing tokens.txt in model dir: {model_dir}"
-            )
+        legacy_kwargs = {}
+        if spec.get("uses_tokens", True):
+            tokens_path = os.path.join(model_dir, "tokens.txt")
+            if not os.path.isfile(tokens_path):
+                raise FileNotFoundError(
+                    f"Missing tokens.txt in model dir: {model_dir}"
+                )
+            legacy_kwargs["tokens"] = tokens_path
 
-        # Build homophone replacer kwargs if files exist
-        hr_kwargs = {}
-        models_root = get_model_file_path("")
-        hr_dict = os.path.join(models_root, "dict")
-        hr_fst = os.path.join(models_root, "replace.fst")
-        hr_lexicon = os.path.join(models_root, "lexicon.txt")
-        if os.path.isdir(hr_dict) and os.path.isfile(hr_fst):
-            hr_kwargs["hr_dict_dir"] = hr_dict
-            hr_kwargs["hr_rule_fsts"] = hr_fst
-            if os.path.isfile(hr_lexicon):
-                hr_kwargs["hr_lexicon"] = hr_lexicon
+            models_root = get_model_file_path("")
+            hr_dict = os.path.join(models_root, "dict")
+            hr_fst = os.path.join(models_root, "replace.fst")
+            hr_lexicon = os.path.join(models_root, "lexicon.txt")
+            if os.path.isdir(hr_dict) and os.path.isfile(hr_fst):
+                legacy_kwargs["hr_dict_dir"] = hr_dict
+                legacy_kwargs["hr_rule_fsts"] = hr_fst
+                if os.path.isfile(hr_lexicon):
+                    legacy_kwargs["hr_lexicon"] = hr_lexicon
 
         factory = getattr(sherpa_onnx.OfflineRecognizer, spec["factory"])
         self._recognizer = factory(
             **model_kwargs,
-            tokens=tokens_path,
             num_threads=2,
             debug=False,
             provider="cpu",
             **spec["extra_kwargs"],
-            **hr_kwargs,
+            **legacy_kwargs,
         )
         logger.asr_event(
             "语音识别服务启动",
