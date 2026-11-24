@@ -79,6 +79,7 @@ class ExternalConversationController:
         self.backend = self.MANAGER
         self.active = False
         self.initial_notify = initial_notify
+        self._native_wake_preroll = not initial_notify
 
         # Per-session asyncio.Future used to receive VAD events
         self._vad_future: asyncio.Future | None = None
@@ -330,7 +331,7 @@ class ExternalConversationController:
             is_recording = True
             logger.debug(f"VAD speech detected, buffer size: {len(speech_buffer)}", module=self.LOG_MODULE)
             # Now wait for silence to know user stopped speaking
-            vad.resume("silence")
+            vad.resume("silence", preserve_input=True)
 
         def _on_silence_hook():
             """Silence detected — stop recording and resolve."""
@@ -362,7 +363,11 @@ class ExternalConversationController:
         vad._handle_silence_frame = _recording_silence_frame
 
         try:
-            vad.resume("speech")
+            if self._native_wake_preroll:
+                self._native_wake_preroll = False
+                vad.resume("speech", preroll_ms=600)
+            else:
+                vad.resume("speech")
             result = await asyncio.wait_for(self._vad_future, timeout=self.timeout)
             return result
 

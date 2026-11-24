@@ -1,4 +1,6 @@
 import uuid
+import threading
+import time
 from typing import Any, Callable, ClassVar, Optional
 
 
@@ -6,18 +8,33 @@ class __GlobalStream:
     def __init__(self):
         self.readers = {}
         self.on_output_data = None
+        self._lock = threading.RLock()
+        self._history = bytearray()
+        self._history_updated = 0.0
 
-    def register_reader(self, reader):
-        if reader.id not in self.readers:
-            self.readers[reader.id] = reader
+    def clear_history(self):
+        with self._lock:
+            self._history.clear()
+            self._history_updated = 0.0
+
+    def register_reader(self, reader, preroll_bytes=0):
+        with self._lock:
+            if reader.id not in self.readers:
+                if preroll_bytes and time.monotonic() - self._history_updated < 0.5:
+                    reader.input(bytes(self._history[-preroll_bytes:]))
+                self.readers[reader.id] = reader
 
     def unregister_reader(self, reader) -> None:
-        if reader.id in self.readers:
-            del self.readers[reader.id]
+        with self._lock:
+            self.readers.pop(reader.id, None)
 
     def input(self, data: bytes) -> None:
-        for key in self.readers:
-            self.readers[key].input(data)
+        with self._lock:
+            self._history.extend(data)
+            del self._history[:-32000]  # Up to one second of 16 kHz mono PCM.
+            self._history_updated = time.monotonic()
+            for reader in self.readers.values():
+                reader.input(data)
 
     def output(self, frames: bytes) -> None:
         if self.on_output_data:
@@ -70,11 +87,12 @@ class MyStream:
         self.input_bytes.clear()
         self._read_offset = 0
 
-    def start_stream(self) -> None:
+    def start_stream(self, preroll_ms: int = 0) -> None:
         if not self._is_active:
             self._is_active = True
             if self._is_input:
-                GlobalStream.register_reader(self)
+                preroll_bytes = int(self._rate * self._channels * 2 * preroll_ms / 1000)
+                GlobalStream.register_reader(self, preroll_bytes=preroll_bytes)
 
     def stop_stream(self) -> None:
         if self._is_active:

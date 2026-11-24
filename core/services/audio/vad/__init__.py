@@ -74,13 +74,17 @@ class _VAD:
         self._reset_state()
         self.stream.stop_stream()
 
-    def resume(self, target: str):
+    def resume(self, target: str, *, preserve_input: bool = False, preroll_ms: int = 0):
         """恢复VAD检测"""
-        self.paused = False
+        self.paused = True
         self.target = target
         self._reset_state()
-        self.stream.clear_input()  # discard stale audio + reset read cursor
-        self.stream.start_stream()
+        if not preserve_input:
+            self.stream.clear_input()  # discard stale audio + reset read cursor
+        if preroll_ms and self.stream.is_active():
+            self.stream.stop_stream()
+        self.stream.start_stream(preroll_ms=preroll_ms)
+        self.paused = False
 
     def _handle_speech_frame(self, frames):
         """处理语音帧"""
@@ -103,8 +107,14 @@ class _VAD:
             self.target == "speech"
             and self.speech_count > self.min_speech_duration * self.sample_rate / 1000
         ):
-            self.pause()
-            EventManager.on_speech(speech_bytes)
+            # Keep the input stream alive while the synchronous callback can
+            # switch to silence detection. Stopping it here drops unread PCM.
+            self.paused = True
+            try:
+                EventManager.on_speech(speech_bytes)
+            finally:
+                if self.paused:
+                    self.pause()
 
     def _handle_silence_frame(self, frames):
         """处理静音帧"""
