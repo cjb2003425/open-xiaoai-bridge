@@ -187,9 +187,11 @@ class WakeupSessionManager:
         kws = get_kws()
         if kws:
             kws.pause()
+        controller = None
         try:
-            self._openclaw_controller = OpenClawConversationController()
-            self._openclaw_task = asyncio.create_task(self._openclaw_controller.start())
+            controller = OpenClawConversationController()
+            self._openclaw_controller = controller
+            self._openclaw_task = asyncio.create_task(controller.start())
             await self._openclaw_task
         except asyncio.CancelledError:
             pass  # interrupted cleanly by on_interrupt
@@ -199,10 +201,11 @@ class WakeupSessionManager:
                 module="Wakeup",
             )
         finally:
-            self._openclaw_controller = None
-            self._openclaw_task = None
-            if kws:
-                kws.resume()
+            if self._openclaw_controller is controller:
+                self._openclaw_controller = None
+                self._openclaw_task = None
+                if kws:
+                    kws.resume()
 
     async def _start_openai_conversation(self, initial_notify: bool = True):
         """Start an OpenAI-compatible continuous conversation session."""
@@ -211,11 +214,13 @@ class WakeupSessionManager:
         kws = get_kws()
         if kws:
             kws.pause()
+        controller = None
         try:
-            self._openai_controller = OpenAIConversationController(
+            controller = OpenAIConversationController(
                 initial_notify=initial_notify
             )
-            self._openai_task = asyncio.create_task(self._openai_controller.start())
+            self._openai_controller = controller
+            self._openai_task = asyncio.create_task(controller.start())
             await self._openai_task
         except asyncio.CancelledError:
             pass
@@ -225,10 +230,11 @@ class WakeupSessionManager:
                 module="Wakeup",
             )
         finally:
-            self._openai_controller = None
-            self._openai_task = None
-            if kws:
-                kws.resume()
+            if self._openai_controller is controller:
+                self._openai_controller = None
+                self._openai_task = None
+                if kws:
+                    kws.resume()
 
     async def _start_qwenpaw_conversation(self):
         """Start a QwenPaw continuous conversation session."""
@@ -237,9 +243,11 @@ class WakeupSessionManager:
         kws = get_kws()
         if kws:
             kws.pause()
+        controller = None
         try:
-            self._qwenpaw_controller = QwenPawConversationController()
-            self._qwenpaw_task = asyncio.create_task(self._qwenpaw_controller.start())
+            controller = QwenPawConversationController()
+            self._qwenpaw_controller = controller
+            self._qwenpaw_task = asyncio.create_task(controller.start())
             await self._qwenpaw_task
         except asyncio.CancelledError:
             pass
@@ -249,10 +257,11 @@ class WakeupSessionManager:
                 module="Wakeup",
             )
         finally:
-            self._qwenpaw_controller = None
-            self._qwenpaw_task = None
-            if kws:
-                kws.resume()
+            if self._qwenpaw_controller is controller:
+                self._qwenpaw_controller = None
+                self._qwenpaw_task = None
+                if kws:
+                    kws.resume()
 
     async def reset_all_sessions(self):
         """Reset all active sessions before starting a new one.
@@ -281,6 +290,19 @@ class WakeupSessionManager:
             self._openai_controller.stop()
         if self._qwenpaw_controller and self._qwenpaw_controller.is_active():
             self._qwenpaw_controller.stop()
+
+        # Wait for old tasks to release shared recording and VAD callbacks
+        # before the next conversation starts using them.
+        tasks = [
+            task for task in (
+                self._openclaw_task, self._openai_task, self._qwenpaw_task
+            )
+            if task is not None and not task.done() and task is not asyncio.current_task()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         # Stop all audio playback on the device
         await self._stop_device_playback()
