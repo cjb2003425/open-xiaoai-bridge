@@ -8,11 +8,17 @@ import asyncio
 import uuid
 from typing import Any
 
-import aiohttp
+from openai import AsyncOpenAI, AuthenticationError
 
+from core.oauth_device import DeviceOAuthTokenManager, OAuthDeviceConfig
 from core.utils.base import get_env
 from core.utils.config import ConfigManager
 from core.utils.logger import logger
+
+
+async def _empty_api_key() -> str:
+    """Let the SDK address unauthenticated OpenAI-compatible endpoints."""
+    return ""
 
 
 class OpenAIManager:
@@ -25,6 +31,11 @@ class OpenAIManager:
     _enabled = False
     _base_url = "http://127.0.0.1:8000/v1"
     _api_key = ""
+    _auth_type = "api_key"
+    _oauth_config: OAuthDeviceConfig | None = None
+    _oauth_manager: DeviceOAuthTokenManager | None = None
+    _client: AsyncOpenAI | None = None
+    _client_fingerprint: tuple[Any, ...] | None = None
     _model = "gpt-4o-mini"
     _session_key = "agent:default:open-xiaoai-bridge"
     # Optional header used to send session_key to the server (e.g. Hermes'
@@ -79,6 +90,16 @@ class OpenAIManager:
 
         cls._base_url = str(config.get("base_url", "http://127.0.0.1:8000/v1")).rstrip("/")
         cls._api_key = cls._configured_api_key(config)
+        cls._auth_type = str(config.get("auth_type", "api_key") or "api_key").strip()
+        if cls._auth_type not in ("api_key", "oauth_device"):
+            raise ValueError(
+                "openai.auth_type must be 'api_key' or 'oauth_device'"
+            )
+        cls._oauth_config = (
+            OAuthDeviceConfig.from_mapping(config.get("oauth", {}))
+            if cls._auth_type == "oauth_device"
+            else None
+        )
         cls._model = str(config.get("model", "gpt-4o-mini"))
         cls._session_key = str(config.get("session_key", "agent:default:open-xiaoai-bridge"))
         cls._session_header = str(config.get("session_header", "X-Hermes-Session-Key") or "").strip()
@@ -136,21 +157,78 @@ class OpenAIManager:
         return int(value)
 
     @classmethod
+    def _current_client_fingerprint(cls) -> tuple[Any, ...]:
+        return (
+            cls._base_url,
+            cls._auth_type,
+            cls._api_key,
+            cls._oauth_config,
+            cls._timeout,
+            cls._session_header,
+            cls._session_key,
+        )
+
+    @classmethod
+    async def _ensure_client(cls) -> AsyncOpenAI:
+        fingerprint = cls._current_client_fingerprint()
+        if cls._client is not None and cls._client_fingerprint == fingerprint:
+            return cls._client
+
+        await cls._close_client()
+
+        if cls._auth_type == "oauth_device":
+            if cls._oauth_config is None:
+                raise ValueError("openai.oauth configuration is required")
+            cls._oauth_manager = DeviceOAuthTokenManager(cls._oauth_config)
+            credential = cls._oauth_manager.get_access_token
+        else:
+            credential = cls._api_key or _empty_api_key
+
+        default_headers: dict[str, str] = {}
+        if cls._session_header and cls._session_key:
+            default_headers[cls._session_header] = cls._session_key
+
+        cls._client = AsyncOpenAI(
+            api_key=credential,
+            base_url=cls._base_url,
+            timeout=cls._timeout,
+            default_headers=default_headers,
+        )
+        cls._client_fingerprint = fingerprint
+        return cls._client
+
+    @classmethod
+    async def _close_client(cls) -> None:
+        client = cls._client
+        oauth_manager = cls._oauth_manager
+        cls._client = None
+        cls._oauth_manager = None
+        cls._client_fingerprint = None
+        if client is not None:
+            await client.close()
+        if oauth_manager is not None:
+            await oauth_manager.close()
+
+    @classmethod
     async def connect(cls) -> bool:
-        """No-op connect hook for parity with WebSocket backends."""
+        """Create the SDK client without forcing an interactive OAuth login."""
         if not cls._initialized:
             cls.initialize_from_config()
-        return cls._enabled
+        if not cls._enabled:
+            return False
+        await cls._ensure_client()
+        return True
 
     @classmethod
     async def close(cls):
-        """Cancel pending response waiters."""
+        """Cancel pending response waiters and close authentication resources."""
         for waiter in list(cls._response_events.values()):
             if not waiter.done():
                 waiter.cancel()
         cls._response_events.clear()
         cls._response_texts.clear()
         cls._response_tts_speakers.clear()
+        await cls._close_client()
 
     @classmethod
     def is_connected(cls) -> bool:
@@ -270,55 +348,33 @@ class OpenAIManager:
         session_key = cls._session_key
         history = cls._sessions.setdefault(session_key, [])
         messages = cls._build_messages(history, text)
-        payload: dict[str, Any] = {
+        request: dict[str, Any] = {
             "model": cls._model,
             "messages": messages,
             "stream": False,
-            **cls._extra_body,
         }
         if cls._temperature is not None:
-            payload["temperature"] = cls._temperature
+            request["temperature"] = cls._temperature
         if cls._max_tokens is not None:
-            payload["max_tokens"] = cls._max_tokens
+            request["max_tokens"] = cls._max_tokens
+        if cls._extra_body:
+            request["extra_body"] = cls._extra_body
 
-        headers = cls._headers()
+        client = await cls._ensure_client()
+        try:
+            response = await client.chat.completions.create(**request)
+        except AuthenticationError:
+            if cls._auth_type != "oauth_device" or cls._oauth_manager is None:
+                raise
+            cls._oauth_manager.invalidate_access_token()
+            response = await client.chat.completions.create(**request)
 
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=cls._timeout)
-        ) as session:
-            async with session.post(
-                cls._chat_completions_url(),
-                json=payload,
-                headers=headers,
-            ) as response:
-                body = await response.json(content_type=None)
-                if response.status >= 400:
-                    message = body.get("error", body) if isinstance(body, dict) else body
-                    raise RuntimeError(f"HTTP {response.status}: {message}")
+        body = response.model_dump() if hasattr(response, "model_dump") else response
 
         response_text = cls._extract_response_text(body)
         if response_text:
             cls._append_history(history, text, response_text)
         return response_text
-
-    @classmethod
-    def _headers(cls) -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
-        if cls._api_key:
-            headers["Authorization"] = f"Bearer {cls._api_key}"
-        # Scope server-side long-term memory to this session (e.g. Hermes'
-        # X-Hermes-Session-Key). chat/completions stays stateless — the
-        # messages array is still the source of turn history — so this does
-        # not duplicate context.
-        if cls._session_header and cls._session_key:
-            headers[cls._session_header] = cls._session_key
-        return headers
-
-    @classmethod
-    def _chat_completions_url(cls) -> str:
-        if cls._base_url.endswith("/chat/completions"):
-            return cls._base_url
-        return cls._base_url.rstrip("/") + "/chat/completions"
 
     @classmethod
     def _build_messages(cls, history: list[dict[str, str]], text: str) -> list[dict[str, str]]:
