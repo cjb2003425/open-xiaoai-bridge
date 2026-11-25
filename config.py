@@ -282,7 +282,19 @@ APP_CONFIG = {
     # 可接入 Hermes Agent API Server、OpenAI、Ollama、LM Studio 等兼容 /v1/chat/completions 的服务
     "openai": {
         "base_url": "http://127.0.0.1:8642/v1",
+        # "api_key"：使用 api_key 或 OPENAI_API_KEY
+        # "oauth_device"：在日志中显示登录地址和验证码，通过浏览器授权
+        "auth_type": "api_key",
         "api_key": "",
+        "oauth": {
+            "device_authorization_endpoint": "https://auth.example.com/oauth/device/code",
+            "token_endpoint": "https://auth.example.com/oauth/token",
+            "client_id": "open-xiaoai-bridge",
+            "scope": "openid offline_access api",
+            "audience": "",
+            "token_file": "./data/openai-oauth-token.json",
+            "refresh_leeway": 120,
+        },
         "model": "gpt-4o-mini",
         # 输入模式：
         #   - "local_asr": 使用本地 VAD + SherpaASR

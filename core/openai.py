@@ -169,6 +169,15 @@ class OpenAIManager:
         )
 
     @classmethod
+    def _sdk_base_url(cls) -> str:
+        """Convert a legacy full Chat Completions URL to an SDK base URL."""
+        base_url = cls._base_url.rstrip("/")
+        suffix = "/chat/completions"
+        if base_url.endswith(suffix):
+            return base_url[: -len(suffix)]
+        return base_url
+
+    @classmethod
     async def _ensure_client(cls) -> AsyncOpenAI:
         fingerprint = cls._current_client_fingerprint()
         if cls._client is not None and cls._client_fingerprint == fingerprint:
@@ -190,7 +199,7 @@ class OpenAIManager:
 
         cls._client = AsyncOpenAI(
             api_key=credential,
-            base_url=cls._base_url,
+            base_url=cls._sdk_base_url(),
             timeout=cls._timeout,
             default_headers=default_headers,
         )

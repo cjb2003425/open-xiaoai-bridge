@@ -491,6 +491,7 @@ Bridge 的 TTS provider 配置跟随各个后端，配置层级保持不变：
 ```python
 "openai": {
     "base_url": "http://127.0.0.1:8000/v1",
+    "auth_type": "api_key",
     "api_key": "",
     "model": "gpt-4o-mini",
     "input_mode": "local_asr",  # 或 "xiaoai_asr"
@@ -503,6 +504,37 @@ Bridge 的 TTS provider 配置跟随各个后端，配置层级保持不变：
     "tts_speaker": "xiaoai",
 }
 ```
+
+API Key 也可以通过环境变量提供，避免写入配置文件：
+
+```bash
+OPENAI_API_KEY="your-api-key"
+```
+
+需要通过浏览器登录自建 OAuth 服务时，使用 OAuth 2.0 Device Authorization Flow：
+
+```python
+"openai": {
+    "base_url": "https://api.example.com/v1",
+    "auth_type": "oauth_device",
+    "model": "gpt-4o-mini",
+    "oauth": {
+        "device_authorization_endpoint": "https://auth.example.com/oauth/device/code",
+        "token_endpoint": "https://auth.example.com/oauth/token",
+        "client_id": "open-xiaoai-bridge",
+        "scope": "openid offline_access api",
+        "audience": "",
+        "token_file": "./data/openai-oauth-token.json",
+        "refresh_leeway": 120,
+    },
+}
+```
+
+首次发起对话时，Bridge 会在日志中显示验证地址和验证码。在浏览器中打开该地址、输入验证码并完成登录后，请求会自动继续；并发请求会共用同一次登录。令牌默认保存到 `./data/openai-oauth-token.json`，以 `0600` 权限原子写入，并在接近过期时自动刷新。Device Flow 通常不需要客户端密钥；如果服务端要求，可仅通过 `OPENAI_OAUTH_CLIENT_SECRET` 环境变量提供。
+
+需要强制重新授权时，先停止 Bridge，把令牌文件移动为备份，再重新启动并发起一次对话。损坏或失效的令牌文件会被安全隔离为 `.invalid` 文件，并重新显示验证地址和验证码。日志不会输出访问令牌、刷新令牌或客户端密钥。
+
+OAuth 仅用于本节的 Chat Completions 对话请求，不用于 OpenAI 兼容 TTS；TTS 仍使用其独立的 `tts.openai.api_key` 配置。
 
 TTS provider 的选择和音频参数见上方 [🔊 TTS 配置](#-tts-配置)。
 

@@ -101,6 +101,80 @@ class OpenAIConfigTest(OpenAIManagerMixin, unittest.TestCase):
                 self.manager._configured_api_key({"api_key": "config-secret"}),
             )
 
+    def _reload_with(self, config):
+        config_manager = SimpleNamespace(
+            get_app_config=MagicMock(return_value=config),
+            add_reload_listener=MagicMock(),
+        )
+        self.manager._reload_listener_registered = True
+        with (
+            patch("core.openai.ConfigManager.instance", return_value=config_manager),
+            patch("core.openai.get_env", return_value=None),
+        ):
+            self.manager.reload_from_config(enabled=True)
+
+    def test_documented_default_api_key_config_initializes(self):
+        from config import APP_CONFIG
+
+        self._reload_with(APP_CONFIG["openai"])
+
+        self.assertEqual("api_key", self.manager._auth_type)
+        self.assertIsNone(self.manager._oauth_config)
+        self.assertEqual(
+            {
+                "device_authorization_endpoint",
+                "token_endpoint",
+                "client_id",
+                "scope",
+                "audience",
+                "token_file",
+                "refresh_leeway",
+            },
+            set(APP_CONFIG["openai"]["oauth"]),
+        )
+
+    def test_complete_device_oauth_example_parses(self):
+        self._reload_with(
+            {
+                "base_url": "https://api.example.com/v1",
+                "model": "example-model",
+                "auth_type": "oauth_device",
+                "oauth": {
+                    "device_authorization_endpoint": (
+                        "https://auth.example.com/oauth/device/code"
+                    ),
+                    "token_endpoint": "https://auth.example.com/oauth/token",
+                    "client_id": "open-xiaoai-bridge",
+                    "scope": "openid offline_access api",
+                    "audience": "",
+                    "token_file": "./data/openai-oauth-token.json",
+                    "refresh_leeway": 120,
+                },
+            }
+        )
+
+        self.assertEqual("oauth_device", self.manager._auth_type)
+        self.assertEqual(
+            "https://auth.example.com/oauth/device/code",
+            self.manager._oauth_config.device_authorization_endpoint,
+        )
+        self.assertEqual(
+            "./data/openai-oauth-token.json", self.manager._oauth_config.token_file
+        )
+
+    def test_unsupported_auth_type_has_clear_error(self):
+        with self.assertRaisesRegex(
+            ValueError, "openai.auth_type must be 'api_key' or 'oauth_device'"
+        ):
+            self._reload_with({"auth_type": "authorization_code"})
+
+    def test_examples_contain_no_client_secret_or_platform_name(self):
+        from config import APP_CONFIG
+
+        self.assertNotIn("client_secret", APP_CONFIG["openai"].get("oauth", {}))
+        for path in (ROOT / "config.py", ROOT / "README.md"):
+            self.assertNotIn("n100", path.read_text(encoding="utf-8").lower())
+
 
 class OpenAIClientTest(OpenAIManagerMixin, unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -121,6 +195,17 @@ class OpenAIClientTest(OpenAIManagerMixin, unittest.IsolatedAsyncioTestCase):
             default_headers={
                 "X-Hermes-Session-Key": "agent:default:open-xiaoai-bridge"
             },
+        )
+
+    async def test_complete_chat_completions_url_is_normalized_for_sdk(self):
+        client = FakeOpenAIClient()
+        self.manager._base_url = "https://api.example.com/v1/chat/completions/"
+
+        with patch("core.openai.AsyncOpenAI", return_value=client) as constructor:
+            await self.manager._ensure_client()
+
+        self.assertEqual(
+            "https://api.example.com/v1", constructor.call_args.kwargs["base_url"]
         )
 
     async def test_oauth_client_uses_async_credential_callable(self):
