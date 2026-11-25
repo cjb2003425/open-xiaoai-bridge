@@ -1,9 +1,13 @@
 import asyncio
+import json
+import os
 import tempfile
 import unittest
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+import aiohttp
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -148,6 +152,11 @@ class DeviceOAuthProtocolTest(unittest.IsolatedAsyncioTestCase):
         )
         return manager, session
 
+    def write_token(self, token):
+        path = Path(self.config.token_file)
+        path.write_text(json.dumps(token), encoding="utf-8")
+        return path
+
     @staticmethod
     def device_response(*, code="device-1", interval=1):
         return {
@@ -275,6 +284,182 @@ class DeviceOAuthProtocolTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(OAuthDeviceAuthorizationError, "expires_in"):
             await manager.get_access_token()
         self.assertEqual("old-token", manager._token["access_token"])
+
+    async def test_valid_persisted_token_skips_network(self):
+        self.write_token(
+            {
+                "access_token": "persisted-access",
+                "refresh_token": "persisted-refresh",
+                "expires_at": 2_000.0,
+            }
+        )
+        manager, session = self.manager([])
+
+        self.assertEqual("persisted-access", await manager.get_access_token())
+        self.assertEqual([], session.calls)
+
+    async def test_token_file_is_atomically_written_with_mode_0600(self):
+        manager, _ = self.manager(
+            [
+                (200, self.device_response()),
+                (200, self.token_response()),
+            ]
+        )
+
+        await manager.get_access_token()
+
+        path = Path(self.config.token_file)
+        self.assertTrue(path.exists())
+        self.assertEqual(0o600, path.stat().st_mode & 0o777)
+        self.assertEqual([], list(path.parent.glob(f".{path.name}.*.tmp")))
+
+    async def test_corrupt_token_file_is_moved_to_invalid_suffix(self):
+        path = Path(self.config.token_file)
+        path.write_text("not-json", encoding="utf-8")
+        manager, _ = self.manager(
+            [
+                (200, self.device_response()),
+                (200, self.token_response()),
+            ]
+        )
+
+        self.assertEqual("access-1", await manager.get_access_token())
+        self.assertTrue(path.with_suffix(path.suffix + ".invalid").exists())
+
+    async def test_refresh_happens_within_leeway(self):
+        self.write_token(
+            {
+                "access_token": "old-access",
+                "refresh_token": "old-refresh",
+                "expires_at": 1_100.0,
+            }
+        )
+        manager, session = self.manager([(200, self.token_response())])
+
+        self.assertEqual("access-1", await manager.get_access_token())
+        self.assertEqual("refresh_token", session.calls[0][1]["grant_type"])
+        self.assertEqual("old-refresh", session.calls[0][1]["refresh_token"])
+
+    async def test_refresh_without_new_refresh_token_retains_old_value(self):
+        self.write_token(
+            {
+                "access_token": "old-access",
+                "refresh_token": "old-refresh",
+                "expires_at": 1_100.0,
+            }
+        )
+        response = self.token_response(access_token="new-access")
+        response.pop("refresh_token")
+        manager, _ = self.manager([(200, response)])
+
+        self.assertEqual("new-access", await manager.get_access_token())
+        stored = json.loads(Path(self.config.token_file).read_text(encoding="utf-8"))
+        self.assertEqual("old-refresh", stored["refresh_token"])
+
+    async def test_rotating_refresh_token_replaces_old_value(self):
+        self.write_token(
+            {
+                "access_token": "old-access",
+                "refresh_token": "old-refresh",
+                "expires_at": 1_100.0,
+            }
+        )
+        response = self.token_response(access_token="new-access")
+        response["refresh_token"] = "rotated-refresh"
+        manager, _ = self.manager([(200, response)])
+
+        await manager.get_access_token()
+        stored = json.loads(Path(self.config.token_file).read_text(encoding="utf-8"))
+        self.assertEqual("rotated-refresh", stored["refresh_token"])
+
+    async def test_refresh_outage_uses_still_valid_access_token(self):
+        self.write_token(
+            {
+                "access_token": "still-valid",
+                "refresh_token": "old-refresh",
+                "expires_at": 1_100.0,
+            }
+        )
+        manager, _ = self.manager([aiohttp.ClientConnectionError("offline")])
+
+        self.assertEqual("still-valid", await manager.get_access_token())
+
+    async def test_invalid_refresh_token_reauthorizes(self):
+        self.write_token(
+            {
+                "access_token": "expired",
+                "refresh_token": "invalid-refresh",
+                "expires_at": 900.0,
+            }
+        )
+        manager, _ = self.manager(
+            [
+                (400, {"error": "invalid_grant"}),
+                (200, self.device_response()),
+                (200, self.token_response(access_token="reauthorized")),
+            ]
+        )
+
+        self.assertEqual("reauthorized", await manager.get_access_token())
+
+    async def test_concurrent_callers_share_one_refresh(self):
+        manager, _ = self.manager([])
+        manager._token = {
+            "access_token": "old-access",
+            "refresh_token": "old-refresh",
+            "expires_at": 1_100.0,
+        }
+        refresh_started = asyncio.Event()
+        release_refresh = asyncio.Event()
+
+        async def refresh_once():
+            refresh_started.set()
+            await release_refresh.wait()
+            return {
+                "access_token": "shared-access",
+                "refresh_token": "shared-refresh",
+                "expires_at": 2_000.0,
+            }
+
+        manager._refresh_access_token = AsyncMock(side_effect=refresh_once)
+        first = asyncio.create_task(manager.get_access_token())
+        await refresh_started.wait()
+        second = asyncio.create_task(manager.get_access_token())
+        await asyncio.sleep(0)
+        release_refresh.set()
+
+        self.assertEqual(
+            ["shared-access", "shared-access"],
+            await asyncio.gather(first, second),
+        )
+        manager._refresh_access_token.assert_awaited_once()
+
+    async def test_close_cancels_poll_unblocks_waiters_and_closes_session(self):
+        polling_started = asyncio.Event()
+
+        async def blocking_sleep(_delay):
+            polling_started.set()
+            await asyncio.Event().wait()
+
+        session = FakeSession([(200, self.device_response())])
+        manager = DeviceOAuthTokenManager(
+            self.config,
+            session_factory=lambda: session,
+            sleep=blocking_sleep,
+            clock=lambda: 1_000.0,
+        )
+        first = asyncio.create_task(manager.get_access_token())
+        second = asyncio.create_task(manager.get_access_token())
+        await polling_started.wait()
+
+        await manager.close()
+        results = await asyncio.wait_for(
+            asyncio.gather(first, second, return_exceptions=True),
+            timeout=0.2,
+        )
+
+        self.assertTrue(all(isinstance(item, asyncio.CancelledError) for item in results))
+        self.assertTrue(session.closed)
 
 
 if __name__ == "__main__":

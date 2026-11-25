@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
+import os
+import tempfile
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 from urllib.parse import urlparse
 
@@ -20,6 +25,10 @@ class OAuthDeviceConfigError(ValueError):
 
 class OAuthDeviceAuthorizationError(RuntimeError):
     """Raised when device authorization cannot produce a valid token."""
+
+    def __init__(self, message: str, *, error_code: str | None = None):
+        super().__init__(message)
+        self.error_code = error_code
 
 
 class _DeviceCodeExpired(Exception):
@@ -107,7 +116,9 @@ class DeviceOAuthTokenManager:
         self._sleep = sleep
         self._clock = clock
         self._session = None
-        self._token: dict[str, Any] = {}
+        self._token: dict[str, Any] = self._load_token()
+        self._operation_lock = asyncio.Lock()
+        self._inflight_task: asyncio.Task[str] | None = None
         self._closed = False
 
     async def get_access_token(self) -> str:
@@ -117,29 +128,112 @@ class DeviceOAuthTokenManager:
         if self._is_access_token_valid(self.config.refresh_leeway):
             return str(self._token["access_token"])
 
+        async with self._operation_lock:
+            if self._is_access_token_valid(self.config.refresh_leeway):
+                return str(self._token["access_token"])
+            if self._inflight_task is None or self._inflight_task.done():
+                self._inflight_task = asyncio.create_task(self._obtain_access_token())
+            task = self._inflight_task
+
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done():
+                async with self._operation_lock:
+                    if self._inflight_task is task:
+                        self._inflight_task = None
+
+    async def _obtain_access_token(self) -> str:
         if self._token.get("refresh_token"):
             try:
                 token = await self._refresh_access_token()
                 self._token = token
+                self._save_token(token)
                 return str(token["access_token"])
-            except OAuthDeviceAuthorizationError:
-                if self._is_access_token_valid():
+            except OAuthDeviceAuthorizationError as exc:
+                if exc.error_code in ("invalid_grant", "invalid_token"):
+                    self._quarantine_token_file()
+                    self._token = {}
+                elif self._is_access_token_valid():
                     return str(self._token["access_token"])
-                raise
+                else:
+                    raise
 
         token = await self._authorize_device()
         self._token = token
+        self._save_token(token)
         return str(token["access_token"])
 
     def invalidate_access_token(self) -> None:
         if self._token:
             self._token["expires_at"] = 0.0
+            self._save_token(self._token)
 
     async def close(self) -> None:
         self._closed = True
+        task = self._inflight_task
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._inflight_task = None
         if self._session is not None and not getattr(self._session, "closed", False):
             await self._session.close()
         self._session = None
+
+    def _load_token(self) -> dict[str, Any]:
+        path = Path(self.config.token_file)
+        if not path.exists():
+            return {}
+        try:
+            token = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(token, dict):
+                raise ValueError("token document is not an object")
+            if not token.get("access_token") and not token.get("refresh_token"):
+                raise ValueError("token document contains no credentials")
+            return token
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            invalid_path = self._quarantine_token_file()
+            logger.warning(
+                "[OpenAI OAuth] Invalid token file moved to "
+                f"{invalid_path}: {type(exc).__name__}"
+            )
+            return {}
+
+    def _save_token(self, token: Mapping[str, Any]) -> None:
+        path = Path(self.config.token_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        temporary_path = Path(temporary_name)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(dict(token), handle, ensure_ascii=False, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+            path.chmod(0o600)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            with contextlib.suppress(OSError):
+                temporary_path.unlink()
+            raise
+
+    def _quarantine_token_file(self) -> Path:
+        path = Path(self.config.token_file)
+        invalid_path = path.with_suffix(path.suffix + ".invalid")
+        suffix = 1
+        while invalid_path.exists():
+            invalid_path = path.with_suffix(path.suffix + f".invalid.{suffix}")
+            suffix += 1
+        if path.exists():
+            path.replace(invalid_path)
+        return invalid_path
 
     async def _authorize_device(self) -> dict[str, Any]:
         while True:
@@ -176,7 +270,8 @@ class DeviceOAuthTokenManager:
         if status >= 400:
             code = str(body.get("error") or "request_failed")
             raise OAuthDeviceAuthorizationError(
-                f"OAuth device authorization request failed: {code}"
+                f"OAuth device authorization request failed: {code}",
+                error_code=code,
             )
 
         required = ("device_code", "user_code", "verification_uri", "expires_in")
@@ -226,9 +321,13 @@ class DeviceOAuthTokenManager:
             if code == "expired_token":
                 raise _DeviceCodeExpired()
             if code == "access_denied":
-                raise OAuthDeviceAuthorizationError("OAuth authorization was denied")
+                raise OAuthDeviceAuthorizationError(
+                    "OAuth authorization was denied",
+                    error_code=code,
+                )
             raise OAuthDeviceAuthorizationError(
-                f"OAuth token request failed: {code}"
+                f"OAuth token request failed: {code}",
+                error_code=code,
             )
 
         raise _DeviceCodeExpired()
@@ -246,7 +345,10 @@ class DeviceOAuthTokenManager:
         status, body = await self._post_form(self.config.token_endpoint, data)
         if status >= 400:
             code = str(body.get("error") or "request_failed")
-            raise OAuthDeviceAuthorizationError(f"OAuth refresh failed: {code}")
+            raise OAuthDeviceAuthorizationError(
+                f"OAuth refresh failed: {code}",
+                error_code=code,
+            )
         token = self._normalize_token(body)
         if not token.get("refresh_token"):
             token["refresh_token"] = self._token.get("refresh_token")
