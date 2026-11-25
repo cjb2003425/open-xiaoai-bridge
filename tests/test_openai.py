@@ -175,6 +175,10 @@ class OpenAIConfigTest(OpenAIManagerMixin, unittest.TestCase):
         for path in (ROOT / "config.py", ROOT / "README.md"):
             self.assertNotIn("n100", path.read_text(encoding="utf-8").lower())
 
+    def test_default_oauth_token_files_are_gitignored(self):
+        ignore_rules = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        self.assertIn("data/openai-oauth-token.json*", ignore_rules)
+
 
 class OpenAIClientTest(OpenAIManagerMixin, unittest.IsolatedAsyncioTestCase):
     def setUp(self):

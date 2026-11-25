@@ -36,6 +36,9 @@ core/models/
 .env
 .env.local
 
+# OAuth credentials and quarantined token backups
+data/openai-oauth-token.json*
+
 tests/*.wav
 local_test/
 

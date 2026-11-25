@@ -362,6 +362,10 @@ class DeviceOAuthTokenManager:
         try:
             async with self._session.post(url, data=dict(data)) as response:
                 body = await response.json(content_type=None)
+        except ValueError as exc:
+            raise OAuthDeviceAuthorizationError(
+                "OAuth endpoint returned invalid JSON"
+            ) from exc
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise OAuthDeviceAuthorizationError(
                 "OAuth endpoint is temporarily unavailable"

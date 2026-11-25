@@ -27,6 +27,8 @@ class FakeResponse:
         self._body = body
 
     async def json(self, content_type=None):
+        if isinstance(self._body, BaseException):
+            raise self._body
         return self._body
 
 
@@ -284,6 +286,16 @@ class DeviceOAuthProtocolTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(OAuthDeviceAuthorizationError, "expires_in"):
             await manager.get_access_token()
         self.assertEqual("old-token", manager._token["access_token"])
+
+    async def test_invalid_json_response_raises_safe_error(self):
+        manager, _session = self.manager(
+            [(200, json.JSONDecodeError("bad", "not-json", 0))]
+        )
+
+        with self.assertRaisesRegex(
+            OAuthDeviceAuthorizationError, "returned invalid JSON"
+        ):
+            await manager.get_access_token()
 
     async def test_valid_persisted_token_skips_network(self):
         self.write_token(
