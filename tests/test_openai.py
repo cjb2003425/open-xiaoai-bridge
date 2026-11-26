@@ -33,13 +33,6 @@ class FakeOpenAIClient:
         self.close = AsyncMock()
 
 
-class FakeOAuthManager:
-    def __init__(self, _config=None):
-        self.get_access_token = AsyncMock(return_value="oauth-access")
-        self.invalidate_access_token = MagicMock()
-        self.close = AsyncMock()
-
-
 def authentication_error():
     request = httpx.Request("POST", "https://api.example.com/v1/chat/completions")
     response = httpx.Response(401, request=request)
@@ -55,9 +48,6 @@ class OpenAIManagerMixin:
         manager._enabled = True
         manager._base_url = "https://api.example.com/v1"
         manager._api_key = "api-secret"
-        manager._auth_type = "api_key"
-        manager._oauth_config = None
-        manager._oauth_manager = None
         manager._client = None
         manager._client_fingerprint = None
         manager._model = "test-model"
@@ -113,71 +103,23 @@ class OpenAIConfigTest(OpenAIManagerMixin, unittest.TestCase):
         ):
             self.manager.reload_from_config(enabled=True)
 
-    def test_documented_default_api_key_config_initializes(self):
-        from config import APP_CONFIG
-
-        self._reload_with(APP_CONFIG["openai"])
-
-        self.assertEqual("api_key", self.manager._auth_type)
-        self.assertIsNone(self.manager._oauth_config)
-        self.assertEqual(
-            {
-                "device_authorization_endpoint",
-                "token_endpoint",
-                "client_id",
-                "scope",
-                "audience",
-                "token_file",
-                "refresh_leeway",
-            },
-            set(APP_CONFIG["openai"]["oauth"]),
-        )
-
-    def test_complete_device_oauth_example_parses(self):
+    def test_openai_config_ignores_no_oauth_mode(self):
         self._reload_with(
             {
                 "base_url": "https://api.example.com/v1",
                 "model": "example-model",
                 "auth_type": "oauth_device",
-                "oauth": {
-                    "device_authorization_endpoint": (
-                        "https://auth.example.com/oauth/device/code"
-                    ),
-                    "token_endpoint": "https://auth.example.com/oauth/token",
-                    "client_id": "open-xiaoai-bridge",
-                    "scope": "openid offline_access api",
-                    "audience": "",
-                    "token_file": "./data/openai-oauth-token.json",
-                    "refresh_leeway": 120,
-                },
+                "oauth": {"this": "must be ignored"},
             }
         )
 
-        self.assertEqual("oauth_device", self.manager._auth_type)
-        self.assertEqual(
-            "https://auth.example.com/oauth/device/code",
-            self.manager._oauth_config.device_authorization_endpoint,
-        )
-        self.assertEqual(
-            "./data/openai-oauth-token.json", self.manager._oauth_config.token_file
-        )
+        self.assertFalse(hasattr(self.manager, "_auth_type"))
+        self.assertFalse(hasattr(self.manager, "_oauth_config"))
+        self.assertFalse(hasattr(self.manager, "_oauth_manager"))
 
-    def test_unsupported_auth_type_has_clear_error(self):
-        with self.assertRaisesRegex(
-            ValueError, "openai.auth_type must be 'api_key' or 'oauth_device'"
-        ):
-            self._reload_with({"auth_type": "authorization_code"})
-
-    def test_examples_contain_no_client_secret_or_platform_name(self):
-        from config import APP_CONFIG
-
-        self.assertNotIn("client_secret", APP_CONFIG["openai"].get("oauth", {}))
+    def test_examples_contain_no_platform_name(self):
         for path in (ROOT / "config.py", ROOT / "README.md"):
             self.assertNotIn("n100", path.read_text(encoding="utf-8").lower())
-
-    def test_default_oauth_token_files_are_gitignored(self):
-        ignore_rules = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
-        self.assertIn("data/openai-oauth-token.json*", ignore_rules)
 
 
 class OpenAIClientTest(OpenAIManagerMixin, unittest.IsolatedAsyncioTestCase):
@@ -201,6 +143,17 @@ class OpenAIClientTest(OpenAIManagerMixin, unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_empty_api_key_supports_unauthenticated_compatible_service(self):
+        client = FakeOpenAIClient()
+        self.manager._api_key = ""
+
+        with patch("core.openai.AsyncOpenAI", return_value=client) as constructor:
+            await self.manager._ensure_client()
+
+        credential = constructor.call_args.kwargs["api_key"]
+        self.assertTrue(callable(credential))
+        self.assertEqual("", await credential())
+
     async def test_complete_chat_completions_url_is_normalized_for_sdk(self):
         client = FakeOpenAIClient()
         self.manager._base_url = "https://api.example.com/v1/chat/completions/"
@@ -211,22 +164,6 @@ class OpenAIClientTest(OpenAIManagerMixin, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             "https://api.example.com/v1", constructor.call_args.kwargs["base_url"]
         )
-
-    async def test_oauth_client_uses_async_credential_callable(self):
-        client = FakeOpenAIClient()
-        oauth = FakeOAuthManager()
-        self.manager._auth_type = "oauth_device"
-        self.manager._oauth_config = object()
-
-        with (
-            patch("core.openai.DeviceOAuthTokenManager", return_value=oauth),
-            patch("core.openai.AsyncOpenAI", return_value=client) as constructor,
-        ):
-            self.assertIs(client, await self.manager._ensure_client())
-
-        kwargs = constructor.call_args.kwargs
-        self.assertIs(oauth.get_access_token, kwargs["api_key"])
-        self.assertEqual("https://api.example.com/v1", kwargs["base_url"])
 
     async def test_configuration_fingerprint_change_closes_old_client(self):
         old_client = FakeOpenAIClient()
@@ -240,21 +177,17 @@ class OpenAIClientTest(OpenAIManagerMixin, unittest.IsolatedAsyncioTestCase):
 
         old_client.close.assert_awaited_once()
 
-    async def test_close_cancels_waiters_and_closes_sdk_and_oauth(self):
+    async def test_close_cancels_waiters_and_closes_sdk(self):
         client = FakeOpenAIClient()
-        oauth = FakeOAuthManager()
         waiter = asyncio.get_running_loop().create_future()
         self.manager._client = client
-        self.manager._oauth_manager = oauth
         self.manager._response_events = {"run": waiter}
 
         await self.manager.close()
 
         self.assertTrue(waiter.cancelled())
         client.close.assert_awaited_once()
-        oauth.close.assert_awaited_once()
         self.assertIsNone(self.manager._client)
-        self.assertIsNone(self.manager._oauth_manager)
 
     async def test_completion_maps_parameters_and_updates_history(self):
         client = FakeOpenAIClient(
@@ -315,38 +248,7 @@ class OpenAIClientTest(OpenAIManagerMixin, unittest.IsolatedAsyncioTestCase):
             await self.manager._request_chat_completion("hello"),
         )
 
-    async def test_oauth_authentication_error_invalidates_and_retries_once(self):
-        oauth = FakeOAuthManager()
-        client = FakeOpenAIClient(
-            [
-                authentication_error(),
-                FakeCompletion(
-                    {"choices": [{"message": {"content": "recovered"}}]}
-                ),
-            ]
-        )
-        self.manager._auth_type = "oauth_device"
-        self.manager._oauth_manager = oauth
-        self.manager._ensure_client = AsyncMock(return_value=client)
-
-        self.assertEqual(
-            "recovered", await self.manager._request_chat_completion("hello")
-        )
-        oauth.invalidate_access_token.assert_called_once_with()
-        self.assertEqual(2, client.chat.completions.create.await_count)
-
-    async def test_second_oauth_authentication_error_is_not_retried(self):
-        oauth = FakeOAuthManager()
-        client = FakeOpenAIClient([authentication_error(), authentication_error()])
-        self.manager._auth_type = "oauth_device"
-        self.manager._oauth_manager = oauth
-        self.manager._ensure_client = AsyncMock(return_value=client)
-
-        with self.assertRaises(AuthenticationError):
-            await self.manager._request_chat_completion("hello")
-        self.assertEqual(2, client.chat.completions.create.await_count)
-
-    async def test_api_key_authentication_error_does_not_use_oauth_retry(self):
+    async def test_authentication_error_is_not_retried_by_application(self):
         client = FakeOpenAIClient([authentication_error()])
         self.manager._ensure_client = AsyncMock(return_value=client)
 

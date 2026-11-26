@@ -8,9 +8,8 @@ import asyncio
 import uuid
 from typing import Any
 
-from openai import AsyncOpenAI, AuthenticationError
+from openai import AsyncOpenAI
 
-from core.oauth_device import DeviceOAuthTokenManager, OAuthDeviceConfig
 from core.utils.base import get_env
 from core.utils.config import ConfigManager
 from core.utils.logger import logger
@@ -31,9 +30,6 @@ class OpenAIManager:
     _enabled = False
     _base_url = "http://127.0.0.1:8000/v1"
     _api_key = ""
-    _auth_type = "api_key"
-    _oauth_config: OAuthDeviceConfig | None = None
-    _oauth_manager: DeviceOAuthTokenManager | None = None
     _client: AsyncOpenAI | None = None
     _client_fingerprint: tuple[Any, ...] | None = None
     _model = "gpt-4o-mini"
@@ -90,16 +86,6 @@ class OpenAIManager:
 
         cls._base_url = str(config.get("base_url", "http://127.0.0.1:8000/v1")).rstrip("/")
         cls._api_key = cls._configured_api_key(config)
-        cls._auth_type = str(config.get("auth_type", "api_key") or "api_key").strip()
-        if cls._auth_type not in ("api_key", "oauth_device"):
-            raise ValueError(
-                "openai.auth_type must be 'api_key' or 'oauth_device'"
-            )
-        cls._oauth_config = (
-            OAuthDeviceConfig.from_mapping(config.get("oauth", {}))
-            if cls._auth_type == "oauth_device"
-            else None
-        )
         cls._model = str(config.get("model", "gpt-4o-mini"))
         cls._session_key = str(config.get("session_key", "agent:default:open-xiaoai-bridge"))
         cls._session_header = str(config.get("session_header", "X-Hermes-Session-Key") or "").strip()
@@ -160,9 +146,7 @@ class OpenAIManager:
     def _current_client_fingerprint(cls) -> tuple[Any, ...]:
         return (
             cls._base_url,
-            cls._auth_type,
             cls._api_key,
-            cls._oauth_config,
             cls._timeout,
             cls._session_header,
             cls._session_key,
@@ -185,20 +169,12 @@ class OpenAIManager:
 
         await cls._close_client()
 
-        if cls._auth_type == "oauth_device":
-            if cls._oauth_config is None:
-                raise ValueError("openai.oauth configuration is required")
-            cls._oauth_manager = DeviceOAuthTokenManager(cls._oauth_config)
-            credential = cls._oauth_manager.get_access_token
-        else:
-            credential = cls._api_key or _empty_api_key
-
         default_headers: dict[str, str] = {}
         if cls._session_header and cls._session_key:
             default_headers[cls._session_header] = cls._session_key
 
         cls._client = AsyncOpenAI(
-            api_key=credential,
+            api_key=cls._api_key or _empty_api_key,
             base_url=cls._sdk_base_url(),
             timeout=cls._timeout,
             default_headers=default_headers,
@@ -209,14 +185,10 @@ class OpenAIManager:
     @classmethod
     async def _close_client(cls) -> None:
         client = cls._client
-        oauth_manager = cls._oauth_manager
         cls._client = None
-        cls._oauth_manager = None
         cls._client_fingerprint = None
         if client is not None:
             await client.close()
-        if oauth_manager is not None:
-            await oauth_manager.close()
 
     @classmethod
     async def connect(cls) -> bool:
@@ -370,13 +342,7 @@ class OpenAIManager:
             request["extra_body"] = cls._extra_body
 
         client = await cls._ensure_client()
-        try:
-            response = await client.chat.completions.create(**request)
-        except AuthenticationError:
-            if cls._auth_type != "oauth_device" or cls._oauth_manager is None:
-                raise
-            cls._oauth_manager.invalidate_access_token()
-            response = await client.chat.completions.create(**request)
+        response = await client.chat.completions.create(**request)
 
         body = response.model_dump() if hasattr(response, "model_dump") else response
 
