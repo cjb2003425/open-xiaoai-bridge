@@ -198,6 +198,62 @@ class ChatGPTCredentialStore:
 
     def __init__(self, path: str):
         self.path = Path(path)
+        self.host_id_path = self.path.with_name(f"{self.path.name}.host-id")
+
+    @staticmethod
+    def _validate_host_id(value: str) -> str:
+        value = str(value or "").strip()
+        prefix = "urn:uuid:"
+        try:
+            parsed = uuid.UUID(value.removeprefix(prefix))
+        except (AttributeError, ValueError) as exc:
+            raise ChatGPTAuthError("Stored ChatGPT host ID is invalid") from exc
+        if (
+            not value.startswith(prefix)
+            or parsed.version != 4
+            or value != f"{prefix}{parsed}"
+        ):
+            raise ChatGPTAuthError("Stored ChatGPT host ID is invalid")
+        return value
+
+    def load_or_create_host_id(self) -> str:
+        """Return the stable per-installation host ID, creating it before login."""
+        try:
+            return self._validate_host_id(
+                self.host_id_path.read_text(encoding="utf-8")
+            )
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise ChatGPTAuthError("ChatGPT host ID could not be read") from exc
+
+        self.host_id_path.parent.mkdir(parents=True, exist_ok=True)
+        host_id = f"urn:uuid:{uuid.uuid4()}"
+        try:
+            fd = os.open(
+                self.host_id_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            return self._validate_host_id(
+                self.host_id_path.read_text(encoding="utf-8")
+            )
+        except OSError as exc:
+            raise ChatGPTAuthError("ChatGPT host ID could not be created") from exc
+
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(host_id)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            with contextlib.suppress(OSError):
+                self.host_id_path.unlink()
+            raise
+        return host_id
 
     def load(self) -> ChatGPTCredentials | None:
         if not self.path.exists():
@@ -311,7 +367,7 @@ class ChatGPTAuthManager:
         ext_agent_host_id = (
             old_credentials.ext_agent_host_id
             if old_credentials is not None
-            else str(uuid.uuid4())
+            else self.store.load_or_create_host_id()
         )
         state = secrets.token_urlsafe(32)
         nonce = secrets.token_urlsafe(32)

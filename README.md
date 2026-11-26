@@ -575,7 +575,7 @@ ssh -L 1455:127.0.0.1:1455 user@bridge-server
 uv run python main.py chatgpt-login
 ```
 
-终端会显示官方授权地址；用浏览器完成登录后，选择命令列出的账户可见模型。验证后的凭据和模型会原子保存到 `./data/chatgpt-siwc.json`，文件权限为 `0600`，且该路径及隔离备份均被 Git 忽略。access token 临期时会自动刷新，并安全替换旋转后的 refresh token。
+终端会显示官方授权地址；用浏览器完成登录后，选择命令列出的账户可见模型。Bridge 会在首次登录前创建并持续复用 `./data/chatgpt-siwc.json.host-id`，验证后的凭据和模型则原子保存到 `./data/chatgpt-siwc.json`。两个文件权限均为 `0600`，相关路径及隔离备份都被 Git 忽略。access token 临期时会自动刷新，并安全替换旋转后的 refresh token。
 
 先做不经过音箱的真实连接测试：
 

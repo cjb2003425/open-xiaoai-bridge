@@ -139,6 +139,21 @@ class ChatGPTCredentialStoreTest(unittest.TestCase):
         self.assertEqual(expected, store.load())
         self.assertEqual([], list(self.path.parent.glob(f".{self.path.name}.*.tmp")))
 
+    def test_host_id_is_urn_uuid_and_persists_before_credentials(self):
+        from core.chatgpt_auth import ChatGPTCredentialStore
+
+        first_store = ChatGPTCredentialStore(str(self.path))
+        first_host_id = first_store.load_or_create_host_id()
+        second_host_id = ChatGPTCredentialStore(str(self.path)).load_or_create_host_id()
+
+        self.assertRegex(
+            first_host_id,
+            r"^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+        )
+        self.assertEqual(first_host_id, second_host_id)
+        self.assertFalse(self.path.exists())
+        self.assertEqual(stat.S_IMODE(first_store.host_id_path.stat().st_mode), 0o600)
+
     def test_corrupt_store_is_quarantined(self):
         from core.chatgpt_auth import ChatGPTCredentialStore
 
@@ -243,6 +258,23 @@ class ChatGPTLoginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.config.agent_name, query["agent_name_hint"])
         self.assertEqual("host-value", query["ext_agent_host_id"])
         self.assertEqual(" ".join(self.config.scopes), query["scope"])
+
+    async def test_first_login_persists_valid_host_id_before_authorization(self):
+        host_id = "urn:uuid:12345678-1234-4123-8123-123456789abc"
+        self.store.load_or_create_host_id.return_value = host_id
+        presented_urls = []
+
+        async def reject_after_presenting(_state, on_ready=None):
+            on_ready()
+            raise RuntimeError("stop after authorization URL")
+
+        self.manager._await_callback = reject_after_presenting
+        with self.assertRaisesRegex(RuntimeError, "stop"):
+            await self.manager.login(presented_urls.append, MagicMock())
+
+        self.store.load_or_create_host_id.assert_called_once_with()
+        self.assertEqual(host_id, self.query(presented_urls[0])["ext_agent_host_id"])
+        self.store.save.assert_not_called()
 
     def test_callback_binds_loopback_exact_path_and_validates_state(self):
         callback = self.manager._validate_callback_request(
