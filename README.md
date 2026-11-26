@@ -6,13 +6,13 @@
 
 [![New](https://img.shields.io/badge/🎉_新功能-OpenClaw_支持_自定义唤醒词_|_连续对话_|_多_Agent_路由_|_克隆音色_|_流式播放-f97316)](https://github.com/coderzc/open-xiaoai-bridge/releases)
 
-**小爱音箱与外部 AI 服务（小智 AI、OpenClaw、OpenAI 兼容服务、QwenPaw）的桥接器**
+**小爱音箱与外部 AI 服务（ChatGPT、小智 AI、OpenClaw、OpenAI 兼容服务、QwenPaw）的桥接器**
 
 打破小爱音箱的封闭生态，灵活接入多种 AI 服务，提供 HTTP API 实现远程控制。
 
 [📺 演示 ①](https://www.bilibili.com/video/BV1DHcBz1Ex7) · [📺 演示 ②](https://www.bilibili.com/video/BV1UQQSBHEvg)
 
-[📖 快速开始](#-快速开始) · [🔊 TTS 配置](#-tts-配置) · [🔌 OpenAI 兼容服务](#-openai-兼容服务) · [🐾 QwenPaw 集成](#-qwenpaw-集成) · [🦞 OpenClaw 集成](#-openclaw-集成) · [🔧 API 文档](#-api-server) · [🐛 常见问题](#-常见问题)
+[📖 快速开始](#-快速开始) · [💬 ChatGPT 登录](#-chatgpt-登录) · [🔊 TTS 配置](#-tts-配置) · [🔌 OpenAI 兼容服务](#-openai-兼容服务) · [🐾 QwenPaw 集成](#-qwenpaw-集成) · [🦞 OpenClaw 集成](#-openclaw-集成) · [🔧 API 文档](#-api-server) · [🐛 常见问题](#-常见问题)
 
 > 本项目受 [Open-XiaoAI](https://github.com/idootop/open-xiaoai) 启发，并参考其 `examples/xiaozhi/` 示例演进而来，现已作为独立项目持续维护。
 
@@ -25,6 +25,7 @@
 | 功能                 | 说明                                                                             |
 | ------------------ | ------------------------------------------------------------------------------ |
 | 🔌 **OpenAI 兼容服务** | 接入 Hermes Agent API Server、OpenAI、Ollama、LM Studio 等 `/v1/chat/completions` 服务 |
+| 💬 **ChatGPT 登录** | 通过官方 Sign in with ChatGPT 使用符合条件的 ChatGPT 方案额度进行普通问答 |
 | 🐾 **QwenPaw 集成**   | 接入 [QwenPaw](https://github.com/agentscope-ai/QwenPaw) HTTP Console 任务接口，支持指定 Agent 和会话 |
 | 🦞 **OpenClaw 集成** | 接入 [OpenClaw](https://github.com/openclaw/openclaw)，支持连续对话，可选豆包 TTS 或小爱原生 TTS  |
 | 🤖 **小智 AI 集成**    | 接入 [xiaozhi-esp32-server](https://github.com/xinnan-tech/xiaozhi-esp32-server) 实时音频流 |
@@ -50,9 +51,9 @@
 
 ### 📥 模型文件
 
-如果你启用小智 AI，或 OpenClaw / OpenAI 兼容服务 / QwenPaw 连续对话使用 `local_asr`，需要下载 `VAD + KWS + ASR` 模型文件。
+如果你启用小智 AI，或 ChatGPT / OpenClaw / OpenAI 兼容服务 / QwenPaw 连续对话使用 `local_asr`，需要下载 `VAD + KWS + ASR` 模型文件。
 
-如果 OpenClaw / OpenAI 兼容服务 / QwenPaw 连续对话使用 `xiaoai_asr`，只需要 `VAD + KWS`，不需要本地 ASR 模型。
+如果 ChatGPT / OpenClaw / OpenAI 兼容服务 / QwenPaw 连续对话使用 `xiaoai_asr`，只需要 `VAD + KWS`，不需要本地 ASR 模型。
 
 1. 从 [releases](https://github.com/coderzc/open-xiaoai-bridge/releases/tag/vad-kws-asr-models) 下载模型压缩包
 2. 解压模型文件（路径见下方具体部署方式）
@@ -96,7 +97,7 @@ cd open-xiaoai-bridge
 # Linux 还需要: pkg-config, patchelf
 
 # 启动（按需设置环境变量）
-API_SERVER_ENABLE=1 XIAOZHI_ENABLE=1 OPENCLAW_ENABLE=1 OPENAI_ENABLE=1 QWENPAW_ENABLE=1 ./scripts/start.sh
+API_SERVER_ENABLE=1 XIAOZHI_ENABLE=1 OPENCLAW_ENABLE=1 OPENAI_ENABLE=1 CHATGPT_ENABLE=1 QWENPAW_ENABLE=1 ./scripts/start.sh
 
 # 启用 Client 鉴权（需与音箱端 token 一致）
 OPEN_XIAOAI_TOKEN=your-secret-token API_SERVER_ENABLE=1 ./scripts/start.sh
@@ -109,6 +110,7 @@ OPEN_XIAOAI_TOKEN=your-secret-token API_SERVER_ENABLE=1 ./scripts/start.sh
 | `XIAOZHI_ENABLE`     | 启用小智 AI     | 禁用            |
 | `OPENCLAW_ENABLE`    | 启用 OpenClaw | 禁用            |
 | `OPENAI_ENABLE` | 启用 OpenAI 兼容服务 | 禁用        |
+| `CHATGPT_ENABLE` | 启用 ChatGPT 方案额度问答 | 禁用        |
 | `QWENPAW_ENABLE` | 启用 QwenPaw | 禁用        |
 | `API_SERVER_ENABLE`  | 启用 HTTP API | 禁用            |
 | `AUDIO_INPUT_ENABLE` | 启用音频输入（关闭后小智/KWS/local\_asr不可用） | 启用            |
@@ -349,7 +351,7 @@ curl -X POST http://localhost:9092/api/interrupt
 
 Bridge 的 TTS provider 配置跟随各个后端，配置层级保持不变：
 
-- `openai.tts_provider`、`openclaw.tts_provider` 和 `qwenpaw.tts_provider` 都可以选择小爱原生、豆包、官方 OpenAI / 兼容服务或本地 MLX-Audio。
+- `chatgpt.tts_provider`、`openai.tts_provider`、`openclaw.tts_provider` 和 `qwenpaw.tts_provider` 都可以选择小爱原生、豆包、官方 OpenAI / 兼容服务或本地 MLX-Audio。
 - 各后端继续使用自己的 `tts_speaker`、`session_tts_speakers` 或 `agent_tts_speakers`；不填写 `tts_provider` 时，保持旧逻辑：`xiaoai` 使用小爱原生，其他音色 ID 使用豆包。
 
 ### 选择 TTS provider
@@ -491,7 +493,6 @@ Bridge 的 TTS provider 配置跟随各个后端，配置层级保持不变：
 ```python
 "openai": {
     "base_url": "http://127.0.0.1:8000/v1",
-    "auth_type": "api_key",
     "api_key": "",
     "model": "gpt-4o-mini",
     "input_mode": "local_asr",  # 或 "xiaoai_asr"
@@ -511,30 +512,7 @@ API Key 也可以通过环境变量提供，避免写入配置文件：
 OPENAI_API_KEY="your-api-key"
 ```
 
-需要通过浏览器登录自建 OAuth 服务时，使用 OAuth 2.0 Device Authorization Flow：
-
-```python
-"openai": {
-    "base_url": "https://api.example.com/v1",
-    "auth_type": "oauth_device",
-    "model": "gpt-4o-mini",
-    "oauth": {
-        "device_authorization_endpoint": "https://auth.example.com/oauth/device/code",
-        "token_endpoint": "https://auth.example.com/oauth/token",
-        "client_id": "open-xiaoai-bridge",
-        "scope": "openid offline_access api",
-        "audience": "",
-        "token_file": "./data/openai-oauth-token.json",
-        "refresh_leeway": 120,
-    },
-}
-```
-
-首次发起对话时，Bridge 会在日志中显示验证地址和验证码。在浏览器中打开该地址、输入验证码并完成登录后，请求会自动继续；并发请求会共用同一次登录。令牌默认保存到 `./data/openai-oauth-token.json`，以 `0600` 权限原子写入，并在接近过期时自动刷新。Device Flow 通常不需要客户端密钥；如果服务端要求，可仅通过 `OPENAI_OAUTH_CLIENT_SECRET` 环境变量提供。
-
-需要强制重新授权时，先停止 Bridge，把令牌文件移动为备份，再重新启动并发起一次对话。损坏或失效的令牌文件会被安全隔离为 `.invalid` 文件，并重新显示验证地址和验证码。日志不会输出访问令牌、刷新令牌或客户端密钥。
-
-OAuth 仅用于本节的 Chat Completions 对话请求，不用于 OpenAI 兼容 TTS；TTS 仍使用其独立的 `tts.openai.api_key` 配置。
+这个后端只使用 API Key 和 Chat Completions。它与下方使用 ChatGPT 方案额度的登录后端完全独立，仍可用于 DeepSeek、Ollama、LM Studio 等兼容服务。
 
 TTS provider 的选择和音频参数见上方 [🔊 TTS 配置](#-tts-配置)。
 
@@ -561,6 +539,73 @@ if "让小黑" in text:
 ```
 
 `base_url` 可以直接填到 `/v1`，框架会自动调用 `/chat/completions`；如果你的服务已经给出完整 `/v1/chat/completions` 地址，也可以直接填写完整地址。连续对话会按 `session_key` 保存最近 `history_max_messages` 条上下文；需要隔离多个助手时，可在唤醒前调用 `app.set_openai_session_key("assistant-name")`。
+
+## 💬 ChatGPT 登录
+
+`chatgpt` 是独立后端，通过官方 **Sign in with ChatGPT** 使用符合条件账户的 ChatGPT 方案额度。它固定调用官方 Responses API，不接受 API Key 或自定义 `base_url`。当前只做普通文字问答，不提供 tools、文件、Shell、网页、MCP 或 Agent 能力。
+
+默认配置：
+
+```python
+"chatgpt": {
+    "callback_port": 1455,
+    "credential_file": "./data/chatgpt-siwc.json",
+    "model": "",  # 留空，登录时从账户可见模型中选择
+    "input_mode": "local_asr",  # 或 "xiaoai_asr"
+    "system_prompt": "请使用简洁、自然的纯文本回答，适合语音播报。",
+    "history_max_messages": 20,
+    "response_timeout": 120,
+    "tts_provider": "xiaoai",
+    "tts_speaker": "xiaoai",
+    "tts_speed": 1.0,
+}
+```
+
+### 浏览器登录
+
+回调只监听服务器的 `127.0.0.1:1455`。如果 Bridge 在远程服务器上，先从有浏览器的电脑建立本地端口转发，并保持 SSH 会话开启：
+
+```bash
+ssh -L 1455:127.0.0.1:1455 user@bridge-server
+```
+
+然后在服务器项目目录运行：
+
+```bash
+uv run python main.py chatgpt-login
+```
+
+终端会显示官方授权地址；用浏览器完成登录后，选择命令列出的账户可见模型。验证后的凭据和模型会原子保存到 `./data/chatgpt-siwc.json`，文件权限为 `0600`，且该路径及隔离备份均被 Git 忽略。access token 临期时会自动刷新，并安全替换旋转后的 refresh token。
+
+先做不经过音箱的真实连接测试：
+
+```bash
+uv run python main.py chatgpt-smoke-test
+```
+
+测试成功后再启动语音服务：
+
+```bash
+CHATGPT_ENABLE=1 ./scripts/start.sh
+```
+
+原生“小爱同学”唤醒时，音箱已经回答“我在”，`before_wakeup` 直接返回 `"chatgpt"`，Bridge 不会再播放一次确认语。一次唤醒内保留多轮上下文；退出或下一次唤醒会清空 ChatGPT 历史。
+
+```python
+async def before_wakeup(speaker, text, source, app):
+    if source == "native_kws":
+        return "chatgpt"
+```
+
+注销并撤销可续期会话：
+
+```bash
+uv run python main.py chatgpt-logout
+```
+
+如果 refresh token 已失效或授权被撤销，重新运行 `chatgpt-login`。达到方案用量限制时，音箱会给出简短提示，请稍后重试；用量与账户中其他使用 ChatGPT 方案额度的应用共享。
+
+ChatGPT 登录凭据只用于文字推理。TTS 始终使用 `chatgpt.tts_provider` 指定的独立配置和鉴权；例如 `tts.openai.api_key` 不会复用 SIWC token。
 
 ## 🐾 QwenPaw 集成
 
@@ -743,7 +788,7 @@ async def before_wakeup(speaker, text, source, app):
     # 返回 None → 交给小爱原生处理
 ```
 
-**返回值含义：** `"openclaw"` → OpenClaw 连续对话，`"openai"` → OpenAI 兼容服务连续对话，`"qwenpaw"` → QwenPaw 连续对话，`"xiaozhi"` → 小智 AI，`None` → 不处理（用户可自行调用 `app.send_to_openclaw()` / `app.send_to_openai()` / `app.send_to_qwenpaw()` 等方法）
+**返回值含义：** `"chatgpt"` → ChatGPT 普通问答，`"openclaw"` → OpenClaw 连续对话，`"openai"` → OpenAI 兼容服务连续对话，`"qwenpaw"` → QwenPaw 连续对话，`"xiaozhi"` → 小智 AI，`None` → 不处理（用户可自行调用 `app.send_to_chatgpt()` / `app.send_to_openclaw()` / `app.send_to_openai()` / `app.send_to_qwenpaw()` 等方法）
 
 ### 🧠 多 Agent 路由 — 一个唤醒词，一个专属 Agent
 

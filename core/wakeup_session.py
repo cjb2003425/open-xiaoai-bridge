@@ -298,6 +298,7 @@ class WakeupSessionManager:
             )
         finally:
             if self._chatgpt_controller is controller:
+                ChatGPTManager.reset_session()
                 self._chatgpt_controller = None
                 self._chatgpt_task = None
                 if kws:

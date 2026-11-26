@@ -121,6 +121,16 @@ class OpenAIConfigTest(OpenAIManagerMixin, unittest.TestCase):
         for path in (ROOT / "config.py", ROOT / "README.md"):
             self.assertNotIn("n100", path.read_text(encoding="utf-8").lower())
 
+    def test_default_openai_config_is_api_key_compatible_only(self):
+        from config import APP_CONFIG
+
+        config = APP_CONFIG["openai"]
+        self.assertIn("base_url", config)
+        self.assertIn("api_key", config)
+        self.assertIn("model", config)
+        self.assertNotIn("auth_type", config)
+        self.assertNotIn("oauth", config)
+
 
 class OpenAIClientTest(OpenAIManagerMixin, unittest.IsolatedAsyncioTestCase):
     def setUp(self):

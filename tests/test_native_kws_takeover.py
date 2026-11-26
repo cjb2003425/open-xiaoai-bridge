@@ -65,14 +65,14 @@ class NativeKwsConfigTest(unittest.TestCase):
     def test_bridge_keywords_are_disabled(self):
         self.assertEqual([], self.config.APP_CONFIG["wakeup"]["keywords"])
 
-    def test_native_wake_routes_to_openai_without_playing_ack(self):
+    def test_native_wake_routes_to_chatgpt_without_playing_ack(self):
         speaker = mock.AsyncMock()
         route = asyncio.run(
             self.config.before_wakeup(
                 speaker, "小爱同学", "native_kws", object()
             )
         )
-        self.assertEqual("openai", route)
+        self.assertEqual("chatgpt", route)
         speaker.play.assert_not_awaited()
 
 

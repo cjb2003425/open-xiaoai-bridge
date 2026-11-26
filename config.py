@@ -26,11 +26,12 @@ async def before_wakeup(speaker, text, source, app):
         source  : 唤醒来源
                     'kws'    — 本地关键词唤醒（用户说了唤醒词）
                     'xiaoai' — 小爱同学收到用户语音指令
-        app     : MainApp 实例，可调用 send_to_openclaw / send_to_openai / send_to_qwenpaw 等方法
+        app     : MainApp 实例，可调用 send_to_openclaw / send_to_openai / send_to_chatgpt / send_to_qwenpaw 等方法
 
     返回值：
         "openclaw" — 进入 OpenClaw 连续对话流程
         "openai"   — 进入 OpenAI 兼容服务连续对话流程（例如 Hermes Agent API Server）
+        "chatgpt"  — 进入使用 ChatGPT 方案额度的普通问答流程
         "qwenpaw"  — 进入 QwenPaw 连续对话流程
         "xiaozhi"  — 进入小智 AI 流程
         None       — 不做额外处理（可在此自行调用 app.send_to_openclaw 等）
@@ -43,7 +44,8 @@ async def before_wakeup(speaker, text, source, app):
         不调用则自动使用 openclaw.session_key 的默认值，无需手动重置。
     """
     if source == "native_kws":
-        return "openai"
+        # 音箱已经自行回答“我在”，这里不要再播放确认语。
+        return "chatgpt"
 
     if source == "kws":
         # --- 示例一：按唤醒词路由到不同 Agent ---
@@ -129,6 +131,7 @@ async def after_wakeup(speaker, source=None, session_key=None):
         - 'xiaozhi': 小智对话超时退出
         - 'openclaw': OpenClaw 连续对话退出
         - 'openai': OpenAI 兼容服务连续对话退出
+        - 'chatgpt': ChatGPT 普通问答连续对话退出
         - 'qwenpaw': QwenPaw 连续对话退出
     - session_key: 当前 OpenClaw/OpenAI/QwenPaw 后端 session_key
         可据此区分是哪个 Agent 退出，例如播放不同的退出提示语
@@ -151,6 +154,8 @@ async def after_wakeup(speaker, source=None, session_key=None):
         await speaker.play(text="龙虾，再见")
     if source == "openai":
         await speaker.play(text="小智，再见")
+    if source == "chatgpt":
+        await speaker.play(text="再见")
     if source == "qwenpaw":
         await speaker.play(text="小爪，再见")
     if source == "xiaozhi":
@@ -282,19 +287,8 @@ APP_CONFIG = {
     # 可接入 Hermes Agent API Server、OpenAI、Ollama、LM Studio 等兼容 /v1/chat/completions 的服务
     "openai": {
         "base_url": "http://127.0.0.1:8642/v1",
-        # "api_key"：使用 api_key 或 OPENAI_API_KEY
-        # "oauth_device"：在日志中显示登录地址和验证码，通过浏览器授权
-        "auth_type": "api_key",
+        # 也可通过 OPENAI_API_KEY 环境变量提供
         "api_key": "",
-        "oauth": {
-            "device_authorization_endpoint": "https://auth.example.com/oauth/device/code",
-            "token_endpoint": "https://auth.example.com/oauth/token",
-            "client_id": "open-xiaoai-bridge",
-            "scope": "openid offline_access api",
-            "audience": "",
-            "token_file": "./data/openai-oauth-token.json",
-            "refresh_leeway": 120,
-        },
         "model": "gpt-4o-mini",
         # 输入模式：
         #   - "local_asr": 使用本地 VAD + SherpaASR
@@ -319,6 +313,28 @@ APP_CONFIG = {
         "rule_prompt": "注意：将结果处理成纯文字版，不要返回任何 markdown 格式，也不要包含任何代码块，并将字数控制在300字以内",
         "rule_prompt_for_skill": "注意：这条消息是主人通过小爱音箱发送的，他看不到你回复的文字。字数控制在300字以内",
         "extra_body": {},
+    },
+    # ChatGPT plan backend (official Sign in with ChatGPT)
+    # 仅支持普通问答，不提供 tools、文件、Shell、网页、MCP 或 Agent 能力。
+    "chatgpt": {
+        # 回调固定绑定 127.0.0.1；远程部署可通过 SSH -L 转发此端口。
+        "callback_port": 1455,
+        "credential_file": "./data/chatgpt-siwc.json",
+        "login_timeout": 300,
+        "refresh_leeway": 120,
+        # 留空时使用 chatgpt-login 中选择并保存的账户可见模型。
+        "model": "",
+        "input_mode": "local_asr",  # 或 "xiaoai_asr"
+        "system_prompt": "请使用简洁、自然的纯文本回答，适合语音播报。",
+        "history_max_messages": 20,
+        "response_timeout": 120,
+        # TTS 鉴权与 ChatGPT 登录凭据完全独立。
+        "tts_provider": "xiaoai",
+        "tts_speaker": "xiaoai",
+        "tts_speed": 1.0,
+        "exit_keywords": ["退出", "停止", "再见"],
+        "rule_prompt": "",
+        "rule_prompt_for_skill": "",
     },
     # QwenPaw Configuration
     # 需先启动 QwenPaw: qwenpaw app

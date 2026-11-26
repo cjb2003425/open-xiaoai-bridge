@@ -241,5 +241,43 @@ class ChatGPTClientTest(ChatGPTManagerMixin, unittest.IsolatedAsyncioTestCase):
         self.manager._auth.close.assert_awaited_once()
 
 
+class ChatGPTConfigContractTest(unittest.TestCase):
+    def test_default_chatgpt_config_has_only_supported_voice_fields(self):
+        from config import APP_CONFIG
+
+        config = APP_CONFIG["chatgpt"]
+        for key in (
+            "callback_port",
+            "credential_file",
+            "model",
+            "history_max_messages",
+            "response_timeout",
+            "tts_provider",
+            "tts_speaker",
+            "tts_speed",
+        ):
+            self.assertIn(key, config)
+        self.assertEqual(1455, config["callback_port"])
+        self.assertEqual("./data/chatgpt-siwc.json", config["credential_file"])
+        self.assertEqual("", config["model"])
+        for forbidden in (
+            "api_key",
+            "base_url",
+            "tools",
+            "temperature",
+            "max_output_tokens",
+            "previous_response_id",
+        ):
+            self.assertNotIn(forbidden, config)
+
+    def test_documentation_removes_generic_oauth_and_platform_specific_host(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8").lower()
+        config = (ROOT / "config.py").read_text(encoding="utf-8").lower()
+        for content in (readme, config):
+            self.assertNotIn("n100", content)
+            self.assertNotIn("oauth_device", content)
+            self.assertNotIn("openai-oauth-token", content)
+
+
 if __name__ == "__main__":
     unittest.main()

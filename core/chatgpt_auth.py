@@ -325,8 +325,10 @@ class ChatGPTAuthManager:
             credentials=old_credentials,
         )
 
-        url_presenter(authorization_url)
-        code, callback_client_id = await self._await_callback(state)
+        code, callback_client_id = await self._await_callback(
+            state,
+            on_ready=lambda: url_presenter(authorization_url),
+        )
         issued_client_id = self._validate_callback_client_id(callback_client_id)
         token_body = await self._exchange_code(
             code=code,
@@ -434,7 +436,11 @@ class ChatGPTAuthManager:
             raise ChatGPTAuthError("ChatGPT callback is incomplete")
         return code, issued_client_id
 
-    async def _await_callback(self, expected_state: str) -> tuple[str, str]:
+    async def _await_callback(
+        self,
+        expected_state: str,
+        on_ready: Callable[[], None] | None = None,
+    ) -> tuple[str, str]:
         loop = asyncio.get_running_loop()
         result: asyncio.Future[tuple[str, str]] = loop.create_future()
 
@@ -466,6 +472,8 @@ class ChatGPTAuthManager:
                 port=self.config.callback_port,
             )
             await site.start()
+            if on_ready is not None:
+                on_ready()
             return await asyncio.wait_for(result, timeout=self.config.login_timeout)
         except asyncio.TimeoutError as exc:
             raise ChatGPTAuthError("ChatGPT sign-in callback timed out") from exc
@@ -779,8 +787,7 @@ class ChatGPTAuthManager:
                         "client_id": credentials.issued_client_id,
                     },
                 ) as response:
-                    await response.json(content_type=None)
-                confirmed = response.status == 200
+                    confirmed = response.status == 200
             except (
                 aiohttp.ClientError,
                 asyncio.TimeoutError,

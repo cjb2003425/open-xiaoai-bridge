@@ -182,7 +182,7 @@ async def run_chatgpt_admin(
             if manager.credentials is None:
                 raise ChatGPTAuthError("请先运行 chatgpt-login")
             response = await smoke_runner()
-            if not response:
+            if not response or "连接成功" not in response:
                 raise ChatGPTAuthError("ChatGPT smoke test did not complete")
             output(f"ChatGPT 连接测试成功：{response}")
             return 0
