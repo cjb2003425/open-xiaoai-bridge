@@ -36,8 +36,8 @@ core/models/
 .env
 .env.local
 
-# OAuth credentials and quarantined token backups
-data/openai-oauth-token.json*
+# ChatGPT SIWC credentials and quarantined backups
+data/chatgpt-siwc.json*
 
 tests/*.wav
 local_test/

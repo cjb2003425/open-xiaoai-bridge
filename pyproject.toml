@@ -12,6 +12,7 @@ dependencies = [
     "onnxruntime==1.23.2",
     "openai>=2.34,<3",
     "pyaudio>=0.2.14",
+    "pyjwt[crypto]>=2.10,<3",
     "pypinyin>=0.54.0",
     "python-socks>=2.8.1",
     "requests>=2.32.3",
