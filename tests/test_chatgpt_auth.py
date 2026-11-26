@@ -305,6 +305,24 @@ class ChatGPTLoginTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ChatGPTAuthError, "client"):
             self.manager._validate_callback_client_id("different-client")
 
+    def test_reauthorization_callback_may_omit_client_id(self):
+        from core.chatgpt_auth import ChatGPTCredentials
+
+        self.manager._credentials = ChatGPTCredentials.from_mapping(
+            ChatGPTCredentialsTest().valid_mapping()
+        )
+        code, callback_client_id = self.manager._validate_callback_request(
+            path="/auth/callback",
+            query={"state": "expected", "code": "code"},
+            expected_state="expected",
+        )
+
+        self.assertEqual("code", code)
+        self.assertEqual(
+            "issued-client",
+            self.manager._validate_callback_client_id(callback_client_id),
+        )
+
     async def test_exchange_uses_issued_client_without_secret(self):
         session = FakeSession([(200, {"access_token": "a"})])
         self.manager._session = session
@@ -318,6 +336,7 @@ class ChatGPTLoginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.config.token_endpoint, url)
         self.assertEqual("issued-client", kwargs["data"]["client_id"])
         self.assertEqual(self.config.redirect_uri, kwargs["data"]["redirect_uri"])
+        self.assertEqual(self.config.resource, kwargs["data"]["resource"])
         self.assertNotIn("client_secret", kwargs["data"])
 
     async def test_missing_direct_usage_scope_is_rejected(self):

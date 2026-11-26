@@ -432,7 +432,7 @@ class ChatGPTAuthManager:
             raise ChatGPTAuthError("ChatGPT authorization was denied")
         code = str(query.get("code", "") or "").strip()
         issued_client_id = str(query.get("client_id", "") or "").strip()
-        if not code or not issued_client_id:
+        if not code:
             raise ChatGPTAuthError("ChatGPT callback is incomplete")
         return code, issued_client_id
 
@@ -483,13 +483,17 @@ class ChatGPTAuthManager:
 
     def _validate_callback_client_id(self, callback_client_id: str) -> str:
         callback_client_id = str(callback_client_id or "").strip()
+        if self._credentials is not None:
+            if (
+                callback_client_id
+                and callback_client_id != self._credentials.issued_client_id
+            ):
+                raise ChatGPTAuthError(
+                    "ChatGPT callback client ID changed during reauthorization"
+                )
+            return callback_client_id or self._credentials.issued_client_id
         if not callback_client_id:
             raise ChatGPTAuthError("ChatGPT callback omitted the issued client ID")
-        if (
-            self._credentials is not None
-            and callback_client_id != self._credentials.issued_client_id
-        ):
-            raise ChatGPTAuthError("ChatGPT callback client ID changed during reauthorization")
         return callback_client_id
 
     async def _exchange_code(
@@ -506,6 +510,7 @@ class ChatGPTAuthManager:
             "client_id": issued_client_id,
             "redirect_uri": self.config.redirect_uri,
             "code_verifier": code_verifier,
+            "resource": self.config.resource,
         }
         try:
             async with session.post(self.config.token_endpoint, data=data) as response:
