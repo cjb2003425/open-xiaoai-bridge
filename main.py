@@ -202,13 +202,14 @@ def run_services(xiaozhi_mode: bool = False):
     Args:
         xiaozhi_mode: 是否启动小智 AI 完整服务（包括 VAD/KWS/GUI）
     """
-    global main_app_instance, enable_api_server, enable_openclaw, enable_openai, enable_qwenpaw
+    global main_app_instance, enable_api_server, enable_openclaw, enable_openai, enable_chatgpt, enable_qwenpaw
 
     # 统一使用 MainApp 管理所有服务
     main_app_instance = MainApp.instance(
         enable_xiaozhi=xiaozhi_mode,
         enable_openclaw=enable_openclaw,
         enable_openai=enable_openai,
+        enable_chatgpt=enable_chatgpt,
         enable_qwenpaw=enable_qwenpaw,
     )
     main_app_instance.run(enable_api_server=enable_api_server)

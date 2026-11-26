@@ -20,6 +20,8 @@ class WakeupSessionManager:
         self._openclaw_task: asyncio.Task | None = None
         self._openai_controller = None
         self._openai_task: asyncio.Task | None = None
+        self._chatgpt_controller = None
+        self._chatgpt_task: asyncio.Task | None = None
         self._qwenpaw_controller = None
         self._qwenpaw_task: asyncio.Task | None = None
         self._xiaozhi_future: asyncio.Future | None = None
@@ -72,6 +74,10 @@ class WakeupSessionManager:
             self._openai_controller.stop()
         if self._openai_task and not self._openai_task.done():
             loop.call_soon_threadsafe(self._openai_task.cancel)
+        if self._chatgpt_controller and self._chatgpt_controller.is_active():
+            self._chatgpt_controller.stop()
+        if self._chatgpt_task and not self._chatgpt_task.done():
+            loop.call_soon_threadsafe(self._chatgpt_task.cancel)
         if self._qwenpaw_controller and self._qwenpaw_controller.is_active():
             self._qwenpaw_controller.stop()
         if self._qwenpaw_task and not self._qwenpaw_task.done():
@@ -117,6 +123,7 @@ class WakeupSessionManager:
         for controller in (
             self._openclaw_controller,
             self._openai_controller,
+            self._chatgpt_controller,
             self._qwenpaw_controller,
         ):
             if controller and controller.is_active():
@@ -169,6 +176,10 @@ class WakeupSessionManager:
             await self._start_openclaw_conversation()
         elif should_wakeup == "openai":
             await self._start_openai_conversation(
+                initial_notify=source != "native_kws"
+            )
+        elif should_wakeup == "chatgpt":
+            await self._start_chatgpt_conversation(
                 initial_notify=source != "native_kws"
             )
         elif should_wakeup == "qwenpaw":
@@ -263,6 +274,35 @@ class WakeupSessionManager:
                 if kws:
                     kws.resume()
 
+    async def _start_chatgpt_conversation(self, initial_notify: bool = True):
+        """Start a fresh, wake-scoped ChatGPT conversation."""
+        from core.chatgpt import ChatGPTManager
+        from core.chatgpt_conversation import ChatGPTConversationController
+
+        kws = get_kws()
+        if kws:
+            kws.pause()
+        controller = None
+        try:
+            ChatGPTManager.reset_session()
+            controller = ChatGPTConversationController(initial_notify=initial_notify)
+            self._chatgpt_controller = controller
+            self._chatgpt_task = asyncio.create_task(controller.start())
+            await self._chatgpt_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.error(
+                f"[Wakeup] ChatGPT conversation failed: {type(exc).__name__}: {exc}",
+                module="Wakeup",
+            )
+        finally:
+            if self._chatgpt_controller is controller:
+                self._chatgpt_controller = None
+                self._chatgpt_task = None
+                if kws:
+                    kws.resume()
+
     async def reset_all_sessions(self):
         """Reset all active sessions before starting a new one.
 
@@ -288,6 +328,8 @@ class WakeupSessionManager:
             self._openclaw_controller.stop()
         if self._openai_controller and self._openai_controller.is_active():
             self._openai_controller.stop()
+        if self._chatgpt_controller and self._chatgpt_controller.is_active():
+            self._chatgpt_controller.stop()
         if self._qwenpaw_controller and self._qwenpaw_controller.is_active():
             self._qwenpaw_controller.stop()
 
@@ -295,7 +337,10 @@ class WakeupSessionManager:
         # before the next conversation starts using them.
         tasks = [
             task for task in (
-                self._openclaw_task, self._openai_task, self._qwenpaw_task
+                self._openclaw_task,
+                self._openai_task,
+                self._chatgpt_task,
+                self._qwenpaw_task,
             )
             if task is not None and not task.done() and task is not asyncio.current_task()
         ]

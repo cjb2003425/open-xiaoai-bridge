@@ -5,6 +5,7 @@ This module manages the main application flow, coordinating between:
 - XiaoZhi (AI conversation service)
 - OpenClaw (External integration)
 - OpenAI (OpenAI-compatible chat service)
+- ChatGPT (official SIWC plan service)
 - QwenPaw (QwenPaw personal agent workstation)
 - Audio system (VAD, KWS, Codec)
 """
@@ -25,6 +26,7 @@ from core.services.protocols.typing import (
 )
 from core.openclaw import OpenClawManager
 from core.openai import OpenAIManager
+from core.chatgpt import ChatGPTManager
 from core.qwenpaw import QwenPawManager
 from core.services.api_server import APIServer
 from core.utils.env import audio_service_flags
@@ -41,6 +43,7 @@ class MainApp:
         enable_xiaozhi: bool = True,
         enable_openclaw: bool = False,
         enable_openai: bool = False,
+        enable_chatgpt: bool = False,
         enable_qwenpaw: bool = False,
     ):
         """Get singleton instance.
@@ -55,6 +58,7 @@ class MainApp:
                 enable_xiaozhi=enable_xiaozhi,
                 enable_openclaw=enable_openclaw,
                 enable_openai=enable_openai,
+                enable_chatgpt=enable_chatgpt,
                 enable_qwenpaw=enable_qwenpaw,
             )
         return cls._instance
@@ -64,6 +68,7 @@ class MainApp:
         enable_xiaozhi: bool = True,
         enable_openclaw: bool = False,
         enable_openai: bool = False,
+        enable_chatgpt: bool = False,
         enable_qwenpaw: bool = False,
     ):
         """Initialize the main application.
@@ -84,6 +89,7 @@ class MainApp:
         self._enable_xiaozhi = enable_xiaozhi
         self._enable_openclaw = enable_openclaw
         self._enable_openai = enable_openai
+        self._enable_chatgpt = enable_chatgpt
         self._enable_qwenpaw = enable_qwenpaw
 
         # Device state
@@ -156,6 +162,12 @@ class MainApp:
             ):
                 local_asr_backends.append("OpenAI")
             if (
+                self._enable_chatgpt
+                and self.config.get_app_config("chatgpt.input_mode", "local_asr")
+                == "local_asr"
+            ):
+                local_asr_backends.append("ChatGPT")
+            if (
                 self._enable_qwenpaw
                 and self.config.get_app_config("qwenpaw.input_mode", "local_asr")
                 == "local_asr"
@@ -196,6 +208,9 @@ class MainApp:
         if self._enable_openai:
             OpenAIManager.initialize_from_config()
             asyncio.run_coroutine_threadsafe(OpenAIManager.connect(), self.loop)
+        if self._enable_chatgpt:
+            ChatGPTManager.initialize_from_config()
+            asyncio.run_coroutine_threadsafe(ChatGPTManager.connect(), self.loop)
         if self._enable_qwenpaw:
             QwenPawManager.initialize_from_config()
             asyncio.run_coroutine_threadsafe(QwenPawManager.connect(), self.loop)
@@ -217,6 +232,7 @@ class MainApp:
             self._enable_xiaozhi
             or self._enable_openclaw
             or self._enable_openai
+            or self._enable_chatgpt
             or self._enable_qwenpaw
         ):
             # Check audio input via env var (same as Rust), default True
@@ -245,6 +261,13 @@ class MainApp:
                     self._enable_openai
                     and self.config.get_app_config(
                         "openai.input_mode", "local_asr"
+                    )
+                    == "local_asr"
+                )
+                or (
+                    self._enable_chatgpt
+                    and self.config.get_app_config(
+                        "chatgpt.input_mode", "local_asr"
                     )
                     == "local_asr"
                 )
@@ -386,6 +409,10 @@ class MainApp:
             asyncio.run_coroutine_threadsafe(
                 OpenAIManager.close(), self.loop
             )
+        if ChatGPTManager.is_enabled():
+            asyncio.run_coroutine_threadsafe(
+                ChatGPTManager.close(), self.loop
+            )
         if QwenPawManager.is_enabled():
             asyncio.run_coroutine_threadsafe(
                 QwenPawManager.close(), self.loop
@@ -482,6 +509,32 @@ class MainApp:
     def set_openai_session_key(self, session_key: str):
         """Override the OpenAI-compatible service session key at runtime."""
         OpenAIManager.set_session_key(session_key)
+
+    async def send_to_chatgpt(self, text: str, wait_response: bool = False) -> str | None:
+        """Send a plain question through the official ChatGPT plan backend."""
+        try:
+            full_text = text
+            if ChatGPTManager._rule_prompt_for_skill:
+                full_text = text + "\n" + ChatGPTManager._rule_prompt_for_skill
+            return await ChatGPTManager.send(full_text, wait_response=wait_response)
+        except Exception as exc:
+            logger.error(f"[MainApp] 发送消息到 ChatGPT 失败: {type(exc).__name__}: {exc}")
+            return None
+
+    async def send_to_chatgpt_and_play_reply(
+        self, text: str, wait_response: bool = False
+    ) -> str | None:
+        """Send a ChatGPT question and play only its completed response."""
+        try:
+            full_text = text
+            if ChatGPTManager._rule_prompt:
+                full_text = text + "\n" + ChatGPTManager._rule_prompt
+            return await ChatGPTManager.send_and_play_reply(
+                full_text, wait_response=wait_response
+            )
+        except Exception as exc:
+            logger.error(f"[MainApp] 发送消息到 ChatGPT 失败: {type(exc).__name__}: {exc}")
+            return None
 
     async def send_to_qwenpaw(self, text: str, wait_response: bool = False) -> str | None:
         """Send message to QwenPaw."""
