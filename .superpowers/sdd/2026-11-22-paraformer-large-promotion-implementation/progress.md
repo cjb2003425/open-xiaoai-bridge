@@ -1,0 +1,14 @@
+# SDD ledger — plan: /home/torrey/workspace/open-xiaoai-bridge/docs/superpowers/plans/2026-11-22-paraformer-large-promotion-implementation.md
+Setup: branch `codex/native-wake-recording-handoff` is an existing isolated feature branch; implementation will not run on main/master.
+Setup: required test-driven-development, verification-before-completion, and finishing-a-development-branch sub-skills are unavailable; equivalent explicit test and verification gates will be recorded here.
+Setup: required shared SDD workspace scripts are unavailable; this plan-specific ignored workspace and task briefs are maintained manually.
+Pre-flight: Task 1 produces the healthy Paraformer Large runtime that Task 2 consumes; backend, exact directory, INT8, VAD/KWS/speaker invariants, and service state must all pass before live testing.
+Task 1 base: edf1208
+Task 1: Ruling: whole-`APP_CONFIG` `ast.literal_eval` fails on the intentional `before_wakeup`/`after_wakeup` callable references — parse only the literal `asr`, `vad`, and `audio_input` sub-dictionaries, which proves the required fields without executing configuration code — if wrong, a required invariant could be misread before restart.
+Task 1: Ruling: the service `.venv` contains sherpa-onnx 2.0.2 but no pip/pytest, while the Conda pytest environment lacks sherpa-onnx — install pytest into the service `.venv` with uv and retain the plan's interpreter-specific test command — if wrong, the tests could run against an environment different from production.
+Task 1: Ruling: `Hermes` occurs only in generic OpenAI-compatible comments/header naming, not as a selected endpoint or enabled service — treat fresh `base_url=https://api.deepseek.com/v1`, `XIAOZHI_ENABLE=0`, and disabled xiaozhi service as the routing invariant — if wrong, requests could be sent to an unintended intermediary despite the logged DeepSeek endpoint.
+Task 1: Ruling: the plan's `83 passed, 3 skipped` count is stale; the unchanged test tree collects exactly 85 tests and pytest 9.2.0 reports `82 passed, 3 skipped, 5 subtests passed` — accept the zero-failure suite as the gate — if wrong, one historical test may have disappeared before this task without being detected by pass/fail status.
+Task 1: complete (commits edf1208..edf1208, tests: `.venv/bin/python -m pytest -q` → 82 passed, 3 skipped, 5 subtests passed in 0.63s; service active, NRestarts=0)
+Task 2 base: edf1208
+Task 2 live-log window start: 2026-11-22T18:18:13+08:00
+Task 2 diagnostic pause: native wake interruption worked while connected (for example 21:57:36 and 21:59:56 immediately exited the active OpenAI conversation), but the speaker socket disconnected at 22:21:04 with `No route to host`; at 22:50 the neighbor state for 10.0.0.5 was `FAILED` and ping had 100% loss, so no later native-KWS event can reach the Bridge. The `NoneType.exit_code` TTS errors are a separate disconnected-speaker robustness defect, not evidence that Paraformer caused the loss.

@@ -186,7 +186,7 @@ APP_CONFIG = {
         # 最小语音时长（ms）
         "min_speech_duration": 250,
         # 最小静默时长（ms）
-        "min_silence_duration": 500,
+        "min_silence_duration": 1200,
     },
     "audio_input": {
         # Input gain multiplier before VAD/KWS/ASR. Use 1.0 to disable.
@@ -194,11 +194,11 @@ APP_CONFIG = {
     },
     "asr": {
         # 支持 "sense_voice"（默认）、"paraformer"、"fire_red_asr" 或 "doubao"
-        "model": "sense_voice",
+        "model": "paraformer",
         # 是否优先使用 INT8 量化模型（仅本地模型生效）
         "int8": True,
         # 可选：显式指定 core/models/ 下的模型目录名（仅本地模型生效）
-        # "model_dir": "",
+        "model_dir": "sherpa-onnx-paraformer-zh-2024-03-09",
         "doubao": {
             # "standard": 录音文件识别标准版，调用 /submit + /query
             # "flash": 录音文件极速版，调用 /recognize/flash
