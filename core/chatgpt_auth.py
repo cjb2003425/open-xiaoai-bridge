@@ -30,6 +30,10 @@ from aiohttp import web
 class ChatGPTAuthError(RuntimeError):
     """A safe-to-display SIWC configuration or authentication error."""
 
+    def __init__(self, message: str, *, error_code: str | None = None):
+        super().__init__(message)
+        self.error_code = error_code
+
 
 @dataclass(frozen=True)
 class ChatGPTAuthConfig:
@@ -262,6 +266,12 @@ class ChatGPTModel:
     display_name: str
 
 
+@dataclass(frozen=True)
+class LogoutResult:
+    revocation_confirmed: bool
+    local_credentials_deleted: bool
+
+
 class ChatGPTAuthManager:
     """Run official SIWC login without exposing credentials to callers."""
 
@@ -283,6 +293,9 @@ class ChatGPTAuthManager:
         self._credentials = self.store.load()
         self._callback_runner: web.AppRunner | None = None
         self._login_task: asyncio.Task | None = None
+        self._refresh_lock = asyncio.Lock()
+        self._refresh_task: asyncio.Task[ChatGPTCredentials] | None = None
+        self._force_refresh = False
 
     @property
     def credentials(self) -> ChatGPTCredentials | None:
@@ -385,10 +398,11 @@ class ChatGPTAuthManager:
             "nonce": nonce,
             "code_challenge": code_challenge,
             "code_challenge_method": "S256",
-            "agent_name_hint": self.config.agent_name,
             "ext_agent_host_id": ext_agent_host_id,
         }
-        if credentials is not None:
+        if credentials is None:
+            params["agent_name_hint"] = self.config.agent_name
+        else:
             params["id_token_hint"] = credentials.id_token
         return f"{self.config.authorization_endpoint}?{urlencode(params)}"
 
@@ -601,12 +615,204 @@ class ChatGPTAuthManager:
             raise ChatGPTAuthError("ChatGPT account has no visible models")
         return models
 
+    async def get_access_token(self) -> str:
+        credentials = self._credentials
+        if credentials is None:
+            raise ChatGPTAuthError("ChatGPT is not signed in; run chatgpt-login")
+        if not self._force_refresh and self._access_token_valid(
+            credentials, self.config.refresh_leeway
+        ):
+            return credentials.access_token
+
+        async with self._refresh_lock:
+            credentials = self._credentials
+            if credentials is None:
+                raise ChatGPTAuthError("ChatGPT is not signed in; run chatgpt-login")
+            if not self._force_refresh and self._access_token_valid(
+                credentials, self.config.refresh_leeway
+            ):
+                return credentials.access_token
+            if self._refresh_task is None or self._refresh_task.done():
+                self._refresh_task = asyncio.create_task(
+                    self._refresh_and_persist(credentials)
+                )
+            task = self._refresh_task
+
+        try:
+            refreshed = await asyncio.shield(task)
+            return refreshed.access_token
+        except ChatGPTAuthError as exc:
+            terminal_codes = {
+                "invalid_grant",
+                "invalid_refresh_token",
+                "token_expired",
+                "refresh_token_expired",
+                "refresh_token_invalidated",
+                "refresh_token_reused",
+                "invalid_client",
+            }
+            current = self._credentials
+            if (
+                exc.error_code not in terminal_codes
+                and current is not None
+                and self._access_token_valid(current, 0)
+            ):
+                return current.access_token
+            raise
+        finally:
+            if task.done():
+                async with self._refresh_lock:
+                    if self._refresh_task is task:
+                        self._refresh_task = None
+
+    async def _refresh_and_persist(
+        self, credentials: ChatGPTCredentials
+    ) -> ChatGPTCredentials:
+        refreshed = await self._refresh_credentials(credentials)
+        self.store.save(refreshed)
+        self._credentials = refreshed
+        self._force_refresh = False
+        return refreshed
+
+    async def _refresh_credentials(
+        self, credentials: ChatGPTCredentials
+    ) -> ChatGPTCredentials:
+        session = self._get_session()
+        data = {
+            "grant_type": "refresh_token",
+            "client_id": credentials.issued_client_id,
+            "refresh_token": credentials.refresh_token,
+            "resource": self.config.resource,
+        }
+        try:
+            async with session.post(self.config.token_endpoint, data=data) as response:
+                body = await response.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            raise ChatGPTAuthError("ChatGPT token refresh is temporarily unavailable") from exc
+        if not isinstance(body, dict):
+            raise ChatGPTAuthError("ChatGPT token refresh returned invalid data")
+        if response.status >= 400:
+            error_code = str(body.get("error", "refresh_failed") or "refresh_failed")
+            terminal_codes = {
+                "invalid_grant",
+                "invalid_refresh_token",
+                "token_expired",
+                "refresh_token_expired",
+                "refresh_token_invalidated",
+                "refresh_token_reused",
+                "invalid_client",
+            }
+            message = (
+                "ChatGPT session is no longer renewable; sign in again"
+                if error_code in terminal_codes
+                else "ChatGPT token refresh was rejected"
+            )
+            raise ChatGPTAuthError(message, error_code=error_code)
+
+        access_token = str(body.get("access_token", "") or "").strip()
+        refresh_token = str(body.get("refresh_token", "") or "").strip()
+        if not access_token or not refresh_token:
+            raise ChatGPTAuthError("ChatGPT token refresh omitted rotating credentials")
+        raw_scope = body.get("scope")
+        scopes = (
+            tuple(str(raw_scope).split())
+            if raw_scope is not None
+            else credentials.scopes
+        )
+        if "chatgpt.tokens.use.direct" not in scopes:
+            raise ChatGPTAuthError("ChatGPT token refresh lacks direct usage scope")
+        try:
+            expires_in = int(body.get("expires_in", 0))
+        except (TypeError, ValueError) as exc:
+            raise ChatGPTAuthError("ChatGPT token refresh has invalid expiry") from exc
+        if expires_in <= 0:
+            raise ChatGPTAuthError("ChatGPT token refresh has invalid expiry")
+        return ChatGPTCredentials.from_mapping(
+            {
+                **credentials.to_mapping(),
+                "id_token": str(body.get("id_token") or credentials.id_token),
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "token_type": str(body.get("token_type") or credentials.token_type),
+                "expires_at": self._clock() + expires_in,
+                "scopes": scopes,
+            }
+        )
+
+    def invalidate_access_token(self) -> None:
+        self._force_refresh = True
+
+    async def list_models(self) -> list[ChatGPTModel]:
+        return await self._list_models_with_token(await self.get_access_token())
+
+    async def require_visible_model(self, configured_model: str = "") -> str:
+        credentials = self._credentials
+        target = str(configured_model or "").strip()
+        if not target and credentials is not None:
+            target = credentials.selected_model
+        visible = {model.slug for model in await self.list_models()}
+        if not target or target not in visible:
+            raise ChatGPTAuthError("Configured ChatGPT model is not available")
+        return target
+
+    async def logout(self) -> LogoutResult:
+        credentials = self._credentials
+        confirmed = False
+        if credentials is not None:
+            try:
+                discovery_url = f"{self.config.issuer}/.well-known/openid-configuration"
+                session = self._get_session()
+                async with session.get(discovery_url) as response:
+                    metadata = await response.json(content_type=None)
+                revocation_endpoint = (
+                    str(metadata.get("revocation_endpoint", "") or "").strip()
+                    if response.status < 400 and isinstance(metadata, dict)
+                    else ""
+                )
+                if not revocation_endpoint:
+                    raise ChatGPTAuthError("ChatGPT revocation endpoint is unavailable")
+                async with session.post(
+                    revocation_endpoint,
+                    data={
+                        "token": credentials.refresh_token,
+                        "token_type_hint": "refresh_token",
+                        "client_id": credentials.issued_client_id,
+                    },
+                ) as response:
+                    await response.json(content_type=None)
+                confirmed = response.status == 200
+            except (
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+                ValueError,
+                ChatGPTAuthError,
+            ):
+                confirmed = False
+        self.store.delete()
+        self._credentials = None
+        self._force_refresh = False
+        return LogoutResult(
+            revocation_confirmed=confirmed,
+            local_credentials_deleted=True,
+        )
+
+    def _access_token_valid(
+        self, credentials: ChatGPTCredentials, leeway: int
+    ) -> bool:
+        return credentials.expires_at > self._clock() + leeway
+
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or getattr(self._session, "closed", False):
             self._session = self._session_factory()
         return self._session
 
     async def close(self) -> None:
+        refresh_task = self._refresh_task
+        if refresh_task is not None and not refresh_task.done():
+            refresh_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await refresh_task
+        self._refresh_task = None
         if self._callback_runner is not None:
             await self._callback_runner.cleanup()
             self._callback_runner = None

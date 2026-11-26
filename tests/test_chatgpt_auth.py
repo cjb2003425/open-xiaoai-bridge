@@ -191,11 +191,17 @@ class FakeSession:
 
     def post(self, url, **kwargs):
         self.calls.append(("POST", url, kwargs))
-        return FakeResponse(*self.responses.pop(0))
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return FakeResponse(*response)
 
     def get(self, url, **kwargs):
         self.calls.append(("GET", url, kwargs))
-        return FakeResponse(*self.responses.pop(0))
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return FakeResponse(*response)
 
     async def close(self):
         self.closed = True
@@ -400,6 +406,161 @@ class ChatGPTIDTokenTest(unittest.TestCase):
                         expected_nonce="expected-nonce",
                         current_time=2_000_000_100,
                     )
+
+
+class ChatGPTLifecycleTest(unittest.IsolatedAsyncioTestCase):
+    def make_manager(self, *, expires_at=2_000.0, responses=()):
+        from core.chatgpt_auth import (
+            ChatGPTAuthConfig,
+            ChatGPTAuthManager,
+            ChatGPTCredentials,
+        )
+
+        data = ChatGPTCredentialsTest().valid_mapping()
+        data["expires_at"] = expires_at
+        credentials = ChatGPTCredentials.from_mapping(data)
+        store = MagicMock()
+        store.load.return_value = credentials
+        session = FakeSession(responses)
+        manager = ChatGPTAuthManager(
+            ChatGPTAuthConfig.from_mapping({"refresh_leeway": 120}),
+            store=store,
+            session_factory=lambda: session,
+            clock=lambda: 1_000.0,
+        )
+        return manager, store, session
+
+    async def test_valid_access_token_skips_refresh(self):
+        manager, store, session = self.make_manager(expires_at=2_000.0)
+        self.assertEqual("access-secret", await manager.get_access_token())
+        self.assertEqual([], session.calls)
+        store.save.assert_not_called()
+
+    async def test_near_expiry_refresh_rotates_and_persists_tokens(self):
+        manager, store, session = self.make_manager(
+            expires_at=1_100.0,
+            responses=[
+                (
+                    200,
+                    {
+                        "access_token": "new-access",
+                        "refresh_token": "new-refresh",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                        "scope": "openid chatgpt.tokens.use.direct",
+                    },
+                )
+            ],
+        )
+        self.assertEqual("new-access", await manager.get_access_token())
+        saved = store.save.call_args.args[0]
+        self.assertEqual("new-refresh", saved.refresh_token)
+        self.assertEqual(4_600.0, saved.expires_at)
+        _, _, kwargs = session.calls[0]
+        self.assertEqual("refresh_token", kwargs["data"]["grant_type"])
+        self.assertEqual("issued-client", kwargs["data"]["client_id"])
+        self.assertEqual("refresh-secret", kwargs["data"]["refresh_token"])
+        self.assertNotIn("scope", kwargs["data"])
+
+    async def test_concurrent_first_call_after_restart_shares_one_refresh(self):
+        manager, store, _session = self.make_manager(expires_at=1_100.0)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def refresh_once(credentials):
+            started.set()
+            await release.wait()
+            return credentials.__class__.from_mapping(
+                {**credentials.to_mapping(), "access_token": "shared", "expires_at": 4_600}
+            )
+
+        manager._refresh_credentials = AsyncMock(side_effect=refresh_once)
+        first = asyncio.create_task(manager.get_access_token())
+        await started.wait()
+        second = asyncio.create_task(manager.get_access_token())
+        await asyncio.sleep(0)
+        release.set()
+        self.assertEqual(["shared", "shared"], await asyncio.gather(first, second))
+        manager._refresh_credentials.assert_awaited_once()
+        store.save.assert_called_once()
+
+    async def test_refresh_failure_preserves_still_valid_credentials(self):
+        import aiohttp
+
+        manager, store, _session = self.make_manager(
+            expires_at=1_100.0,
+            responses=[aiohttp.ClientConnectionError("offline")],
+        )
+        self.assertEqual("access-secret", await manager.get_access_token())
+        self.assertEqual("access-secret", manager.credentials.access_token)
+        store.save.assert_not_called()
+
+    async def test_invalid_grant_requires_login_without_deleting_diagnostics(self):
+        from core.chatgpt_auth import ChatGPTAuthError
+
+        manager, store, _session = self.make_manager(
+            expires_at=900.0,
+            responses=[(400, {"error": "invalid_grant"})],
+        )
+        with self.assertRaisesRegex(ChatGPTAuthError, "sign in again"):
+            await manager.get_access_token()
+        self.assertEqual("refresh-secret", manager.credentials.refresh_token)
+        store.delete.assert_not_called()
+
+    async def test_model_catalog_keeps_visible_order(self):
+        manager, _store, _session = self.make_manager(
+            responses=[
+                (
+                    200,
+                    {
+                        "models": [
+                            {"slug": "first", "display_name": "First", "visibility": "list"},
+                            {"slug": "hidden", "visibility": "hidden"},
+                            {"slug": "second", "display_name": "Second", "visibility": "list"},
+                        ]
+                    },
+                )
+            ]
+        )
+        models = await manager.list_models()
+        self.assertEqual(["first", "second"], [model.slug for model in models])
+
+    async def test_configured_or_selected_model_must_be_visible(self):
+        from core.chatgpt_auth import ChatGPTAuthError, ChatGPTModel
+
+        manager, _store, _session = self.make_manager()
+        manager.list_models = AsyncMock(return_value=[ChatGPTModel("visible", "Visible")])
+        self.assertEqual("visible", await manager.require_visible_model("visible"))
+        with self.assertRaisesRegex(ChatGPTAuthError, "not available"):
+            await manager.require_visible_model("missing")
+
+    async def test_logout_revokes_then_deletes(self):
+        manager, store, session = self.make_manager(
+            responses=[
+                (200, {"revocation_endpoint": "https://auth.openai.com/revoke"}),
+                (200, {}),
+            ]
+        )
+        result = await manager.logout()
+        self.assertTrue(result.revocation_confirmed)
+        self.assertTrue(result.local_credentials_deleted)
+        self.assertIsNone(manager.credentials)
+        store.delete.assert_called_once()
+        _, url, kwargs = session.calls[1]
+        self.assertEqual("https://auth.openai.com/revoke", url)
+        self.assertEqual("refresh-secret", kwargs["data"]["token"])
+
+    async def test_logout_network_failure_deletes_locally_and_reports_unconfirmed(self):
+        import aiohttp
+
+        manager, store, _session = self.make_manager(
+            responses=[aiohttp.ClientConnectionError("offline")]
+        )
+        result = await manager.logout()
+        self.assertFalse(result.revocation_confirmed)
+        self.assertTrue(result.local_credentials_deleted)
+        store.delete.assert_called_once()
+        self.assertIsNone(manager.credentials)
 
 
 if __name__ == "__main__":
